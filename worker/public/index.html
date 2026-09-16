@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F6B59">
+<title>Bottle Tree — Run a Sale</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Nunito+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+ --bg:#F4ECDC;--panel:#FBF6EA;--panel2:#EFE4CC;--ink:#241B10;--sub:#6A5B44;--line:#E0D2B4;
+ --green:#0F6B59;--green-d:#0A4F42;--cobalt:#1E44C4;--gold:#B8862F;--rust:#B4552B;--ok:#0F6B59;
+ --shadow:0 1px 2px rgba(40,28,10,.06),0 8px 22px rgba(40,28,10,.08);
+}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){
+ --bg:#161210;--panel:#211B15;--panel2:#2A2219;--ink:#F1E7D4;--sub:#B7A889;--line:#3A2F22;
+ --green:#3FBBA0;--green-d:#2C7D6C;--cobalt:#7C9BFF;--gold:#E0B458;--rust:#E38657;--ok:#3FBBA0;
+ --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.4);
+}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased;padding-bottom:76px}
+h1,h2,h3{font-family:"Fraunces",Georgia,serif;font-weight:600;margin:0}
+button{font-family:inherit;cursor:pointer}
+.wrap{max-width:620px;margin:0 auto;padding:0 14px}
+header.top{position:sticky;top:0;z-index:10;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 0}
+.top .wrap{display:flex;align-items:center;gap:10px}
+.mark{display:flex;align-items:center;gap:8px;font-family:"Fraunces",serif;font-weight:600;font-size:1.05rem}
+.mark span{color:var(--green)}
+.top .ctx{margin-left:auto;font-size:.9rem;color:var(--sub);font-weight:700;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52%}
+.back{background:none;border:0;color:var(--cobalt);font-weight:800;font-size:.9rem;padding:4px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:var(--shadow);margin:12px 0}
+.muted{color:var(--sub)}
+.row{display:flex;gap:8px;align-items:center}
+label{display:block;font-size:.72rem;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--sub);margin:0 0 4px}
+input,select{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit}
+input:focus,select:focus{outline:2px solid var(--cobalt);border-color:var(--cobalt)}
+.btn{background:var(--green);color:#fff;border:0;border-radius:11px;padding:13px 16px;font-weight:800;font-size:1rem;width:100%}
+.btn:active{background:var(--green-d)}
+.btn.sec{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
+.btn.sm{width:auto;padding:8px 12px;font-size:.85rem;border-radius:9px}
+.btn.rust{background:var(--rust)}
+.pill{display:inline-block;font-size:.7rem;font-weight:800;padding:2px 8px;border-radius:20px;background:var(--panel2);color:var(--sub)}
+.big{font-family:"Fraunces",serif;font-size:2rem;font-weight:600}
+.h1{font-size:1.5rem;margin:14px 0 2px}
+.list{display:flex;flex-direction:column;gap:8px}
+.li{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 13px}
+.li .nm{font-weight:700}
+.li .pr{margin-left:auto;font-weight:800;font-variant-numeric:tabular-nums}
+.li.selected{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}
+.li.sold{opacity:.5}
+.tap{cursor:pointer;user-select:none}
+.tabbar{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--line);display:flex;padding:6px max(14px,env(safe-area-inset-left)) calc(6px + env(safe-area-inset-bottom));z-index:20}
+.tabbar button{flex:1;background:none;border:0;color:var(--sub);font-weight:800;font-size:.72rem;padding:8px 2px;display:flex;flex-direction:column;align-items:center;gap:3px}
+.tabbar button .ic{font-size:1.15rem}
+.tabbar button.on{color:var(--green)}
+.hidden{display:none!important}
+.cartbar{position:fixed;left:0;right:0;bottom:70px;z-index:15;display:flex;justify-content:center;pointer-events:none}
+.cartbar .inner{pointer-events:auto;background:var(--green);color:#fff;border-radius:13px;box-shadow:var(--shadow);display:flex;align-items:center;gap:14px;padding:10px 14px;max-width:592px;width:calc(100% - 28px)}
+.cartbar .tot{font-family:"Fraunces",serif;font-weight:600;font-size:1.25rem;font-variant-numeric:tabular-nums}
+.cartbar .go{margin-left:auto;background:#fff;color:var(--green);border:0;border-radius:9px;padding:9px 16px;font-weight:800}
+.empty{text-align:center;color:var(--sub);padding:34px 10px}
+.empty .em{font-size:2rem}
+.split{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}
+.split:last-child{border:0}
+.split .amt{font-weight:800;font-variant-numeric:tabular-nums}
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+.kpi .n{font-family:"Fraunces",serif;font-size:1.6rem;font-weight:600;color:var(--green)}
+.kpi .l{font-size:.8rem;color:var(--sub)}
+.toast{position:fixed;bottom:150px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:20px;font-weight:700;font-size:.9rem;z-index:40;opacity:0;transition:opacity .2s}
+.toast.show{opacity:.95}
+.seg{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.seg button{border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:20px;padding:6px 12px;font-weight:700;font-size:.82rem}
+.seg button.on{background:var(--green);color:#fff;border-color:var(--green)}
+svg.logo{width:22px;height:26px}
+textarea{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit;resize:vertical}
+textarea:focus{outline:2px solid var(--cobalt);border-color:var(--cobalt)}
+.shots{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.shot{display:block;cursor:pointer;text-align:center;margin:0}
+.shot .ph{aspect-ratio:1;border:2px dashed var(--line);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.6rem;background:var(--bg);overflow:hidden}
+.shot .ph img{width:100%;height:100%;object-fit:cover}
+.shot .sl{font-size:.78rem;font-weight:800;margin-top:4px;text-transform:none;letter-spacing:0;color:var(--ink)}
+.shot .sh{font-size:.66rem;color:var(--sub);line-height:1.2;text-transform:none;letter-spacing:0;font-weight:400}
+.thumbs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.thumbs img{width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
+ul.ev{margin:4px 0 0;padding-left:18px;font-size:.88rem}ul.ev li{margin:3px 0}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <button class="back hidden" id="backBtn">‹ Sales</button>
+  <span class="mark"><svg class="logo" viewBox="0 0 34 40" fill="none"><path d="M17 39V15" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round"/><circle cx="7.5" cy="12.5" r="2.4" fill="var(--cobalt)"/><circle cx="26.5" cy="12.5" r="2.4" fill="var(--cobalt)"/><circle cx="17" cy="3.4" r="2.4" fill="var(--gold)"/><path d="M11 39h12" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round"/></svg>Bottle&nbsp;<span>Tree</span></span>
+  <span class="ctx" id="ctx"></span>
+</div></header>
+<main class="wrap" id="app"></main>
+<div class="cartbar hidden" id="cartbar"><div class="inner"><span class="tot" id="cartTot">$0.00</span><span id="cartCnt" style="font-weight:700;font-size:.85rem"></span><button class="go" id="cartGo">Charge</button></div></div>
+<nav class="tabbar hidden" id="tabs">
+  <button data-tab="items" class="on"><span class="ic">🏷️</span>Items</button>
+  <button data-tab="cashier"><span class="ic">💵</span>Cashier</button>
+  <button data-tab="summary"><span class="ic">📊</span>Summary</button>
+</nav>
+<div class="toast" id="toast"></div>
+<script src="/app.js?v=0.3"></script>
+</body>
+</html>

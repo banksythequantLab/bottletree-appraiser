@@ -1,0 +1,11 @@
+.env
+.dev.vars
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+.wrangler/
+*.log
+.DS_Store
+Thumbs.db

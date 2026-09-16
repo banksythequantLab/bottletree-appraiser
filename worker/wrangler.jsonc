@@ -1,0 +1,26 @@
+{
+  "name": "bottletree-app",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/p/*", "/shop/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bottletree",
+      "database_id": "c64195f6-148f-4ea5-ba06-90bac6f88290"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "PHOTOS", "bucket_name": "bottletree-photos" }
+  ],
+  "vars": {
+    // Public URL of the FastAPI appraiser on Nebius AI Cloud (no trailing slash)
+    "APPRAISER_URL": "http://127.0.0.1:8089",
+    "PUBLIC_ORIGIN": "https://bottletree-app.dj-b02.workers.dev"
+  }
+  // Secrets (wrangler secret put): APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+}

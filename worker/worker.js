@@ -1,0 +1,460 @@
+// Bottle Tree app v0.3 — API worker: accounts, sales, photos (R2), AI appraisals (Nebius), storefront + Stripe.
+// Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
+const now = () => new Date().toISOString();
+const uid = () => crypto.randomUUID();
+const enc = new TextEncoder();
+function J(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...extraHeaders } });
+}
+function H(html, status = 200, cache = "public, max-age=60") {
+  return new Response(html, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": cache } });
+}
+async function readJson(req) { try { return await req.json(); } catch { return {}; } }
+function hex(buf) { return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join(""); }
+function randHex(n = 32) { const a = new Uint8Array(n); crypto.getRandomValues(a); return hex(a); }
+const esc = s => String(s ?? "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+const money = c => "$" + (Number(c || 0) / 100).toFixed(2);
+const PHOTO_KINDS = new Set(["front", "back", "underside", "marks", "detail", "damage", "other"]);
+const slugify = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+
+async function pbkdf2(password, saltHex) {
+  const salt = Uint8Array.from(saltHex.match(/../g).map(h => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" }, key, 256);
+  return hex(bits);
+}
+function timingEq(a, b) { if (a.length !== b.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; }
+async function hmacHex(secret, msg) {
+  const k = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return hex(await crypto.subtle.sign("HMAC", k, enc.encode(msg)));
+}
+
+function getCookie(req, name) {
+  const c = req.headers.get("Cookie") || "";
+  const m = c.match(new RegExp("(?:^|; )" + name + "=([^;]+)"));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function sessionCookie(token) { return `bt_session=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`; }
+const clearCookie = "bt_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
+
+async function currentUser(req, db) {
+  const tok = getCookie(req, "bt_session");
+  if (!tok) return null;
+  const s = await db.prepare("SELECT user_id, expires_at FROM sessions WHERE token=?").bind(tok).first();
+  if (!s) return null;
+  if (new Date(s.expires_at) < new Date()) { await db.prepare("DELETE FROM sessions WHERE token=?").bind(tok).run(); return null; }
+  return s.user_id;
+}
+async function newSession(db, userId) {
+  const tok = randHex(24);
+  const exp = new Date(Date.now() + 2592000000).toISOString();
+  await db.prepare("INSERT INTO sessions (token,user_id,created_at,expires_at) VALUES (?,?,?,?)").bind(tok, userId, now(), exp).run();
+  return tok;
+}
+
+// ---------- appraisal (calls the Nebius-hosted FastAPI service) ----------
+async function runAppraisal(env, appraisalId, item, photos) {
+  const db = env.DB;
+  try {
+    const body = {
+      item_id: item.id,
+      description: item.description || "",
+      markings: item.markings || "",
+      photos: photos.map(p => ({ url: `${env.PUBLIC_ORIGIN}/p/${p.r2_key}`, kind: p.kind })),
+    };
+    const headers = { "content-type": "application/json" };
+    if (env.APPRAISER_SERVICE_KEY) headers["x-appraiser-key"] = env.APPRAISER_SERVICE_KEY;
+    const r = await fetch(`${env.APPRAISER_URL}/appraise`, { method: "POST", headers, body: JSON.stringify(body) });
+    const text = await r.text();
+    if (!r.ok) throw new Error(`appraiser ${r.status}: ${text.slice(0, 300)}`);
+    const result = JSON.parse(text);
+    await db.prepare("UPDATE appraisals SET status='done', result_json=?, model_text=?, model_vision=?, completed_at=? WHERE id=?")
+      .bind(text, result.models?.text || null, result.models?.vision || null, now(), appraisalId).run();
+    // pre-fill AI copy on the item (dealer still approves before it goes live)
+    await db.prepare("UPDATE items SET ai_title=?, ai_description=? WHERE id=?")
+      .bind(result.listing?.title || null, result.listing?.description || null, item.id).run();
+  } catch (e) {
+    await db.prepare("UPDATE appraisals SET status='error', error=?, completed_at=? WHERE id=?")
+      .bind(String(e && e.message || e).slice(0, 1000), now(), appraisalId).run();
+  }
+}
+
+async function itemBundle(db, itemId) {
+  const item = await db.prepare("SELECT * FROM items WHERE id=?").bind(itemId).first();
+  if (!item) return null;
+  const photos = (await db.prepare("SELECT * FROM photos WHERE item_id=? ORDER BY sort, created_at").bind(itemId).all()).results;
+  const ap = await db.prepare("SELECT * FROM appraisals WHERE item_id=? ORDER BY created_at DESC LIMIT 1").bind(itemId).first();
+  let appraisal = null;
+  if (ap) appraisal = { id: ap.id, status: ap.status, error: ap.error, created_at: ap.created_at, completed_at: ap.completed_at,
+                        result: ap.result_json ? JSON.parse(ap.result_json) : null };
+  return { item, photos: photos.map(p => ({ ...p, url: `/p/${p.r2_key}` })), appraisal };
+}
+
+// ---------- Stripe (raw REST, no SDK) ----------
+async function stripeCheckout(env, item, shop, photoUrl, origin) {
+  const form = new URLSearchParams();
+  form.set("mode", "payment");
+  form.set("success_url", `${origin}/shop/${shop.shop_slug}/item/${item.id}?paid=1`);
+  form.set("cancel_url", `${origin}/shop/${shop.shop_slug}/item/${item.id}`);
+  form.set("line_items[0][quantity]", "1");
+  form.set("line_items[0][price_data][currency]", "usd");
+  form.set("line_items[0][price_data][unit_amount]", String(item.price_cents));
+  form.set("line_items[0][price_data][product_data][name]", item.ai_title || item.name);
+  if (photoUrl) form.set("line_items[0][price_data][product_data][images][0]", photoUrl);
+  form.set("metadata[item_id]", item.id);
+  const r = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST", headers: { authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "content-type": "application/x-www-form-urlencoded" }, body: form,
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error?.message || "stripe error");
+  return j;
+}
+async function verifyStripeSig(env, rawBody, sigHeader) {
+  const parts = Object.fromEntries((sigHeader || "").split(",").map(kv => kv.split("=")));
+  if (!parts.t || !parts.v1) return false;
+  const expected = await hmacHex(env.STRIPE_WEBHOOK_SECRET, `${parts.t}.${rawBody}`);
+  return timingEq(expected, parts.v1);
+}
+async function markSoldOnline(db, itemId, sessionId, email) {
+  const item = await db.prepare("SELECT * FROM items WHERE id=? AND status='available'").bind(itemId).first();
+  if (!item) return false;
+  const txnId = uid();
+  await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)")
+    .bind(txnId, item.sale_id, item.price_cents, 1, "stripe", now()).run();
+  await db.prepare("UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status='hidden' WHERE id=?").bind(txnId, now(), itemId).run();
+  await db.prepare("UPDATE orders SET status='paid', paid_at=?, buyer_email=? WHERE stripe_session_id=?").bind(now(), email || null, sessionId).run();
+  return true;
+}
+
+// ---------- public storefront (server-rendered) ----------
+const SHOP_CSS = `:root{--bg:#F4ECDC;--panel:#FBF6EA;--ink:#241B10;--sub:#6A5B44;--line:#E0D2B4;--green:#0F6B59;--cobalt:#1E44C4}
+@media(prefers-color-scheme:dark){:root{--bg:#161210;--panel:#211B15;--ink:#F1E7D4;--sub:#B7A889;--line:#3A2F22;--green:#3FBBA0;--cobalt:#7C9BFF}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Nunito Sans",system-ui,sans-serif;line-height:1.5}
+h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:600;margin:0}.wrap{max-width:1040px;margin:0 auto;padding:0 16px}
+header{padding:22px 0;border-bottom:1px solid var(--line);background:var(--panel)}header .wrap{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+header a{color:inherit;text-decoration:none}.blurb{color:var(--sub)}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;padding:22px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:block;color:inherit;text-decoration:none}
+.card img{width:100%;aspect-ratio:1;object-fit:cover;background:#ddd}.card .b{padding:12px 14px}.card .t{font-weight:700}.card .p{color:var(--green);font-weight:800;margin-top:4px}
+.item{display:grid;grid-template-columns:1fr;gap:22px;padding:22px 0}@media(min-width:760px){.item{grid-template-columns:1.1fr 1fr}}
+.gal img{width:100%;border-radius:12px;border:1px solid var(--line);margin-bottom:10px}.thumbs{display:flex;gap:8px;flex-wrap:wrap}.thumbs img{width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid var(--line);cursor:pointer}
+.price{font-family:Fraunces,serif;font-size:2rem;color:var(--green);margin:8px 0}.desc{white-space:pre-wrap;color:var(--ink)}
+.btn{display:inline-block;background:var(--green);color:#fff;border:0;border-radius:11px;padding:14px 22px;font-weight:800;font-size:1rem;cursor:pointer;text-decoration:none}
+.meta{font-size:.85rem;color:var(--sub);margin-top:14px}.pill{display:inline-block;font-size:.72rem;font-weight:800;padding:2px 9px;border-radius:20px;background:var(--line);color:var(--sub);margin-right:6px}
+.empty{padding:60px 0;text-align:center;color:var(--sub)}footer{padding:30px 0;color:var(--sub);font-size:.8rem;text-align:center}.ok{background:var(--green);color:#fff;padding:10px 14px;border-radius:10px;margin:14px 0;font-weight:700}`;
+
+function shopPage(shop, title, body) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Nunito+Sans:wght@400;700;800&display=swap" rel="stylesheet">
+<style>${SHOP_CSS}</style></head><body><header><div class="wrap"><h1><a href="/shop/${esc(shop.shop_slug)}">${esc(shop.shop_name || shop.shop_slug)}</a></h1>
+${shop.shop_blurb ? `<span class="blurb">${esc(shop.shop_blurb)}</span>` : ""}</div></header><main class="wrap">${body}</main>
+<footer>Powered by Bottle Tree · listings drafted with NVIDIA Nemotron on Nebius</footer></body></html>`;
+}
+function firstPhoto(photos) { return photos.find(p => p.kind === "front") || photos[0]; }
+
+async function renderShop(db, slug) {
+  const shop = await db.prepare("SELECT id, shop_slug, shop_name, shop_blurb FROM users WHERE shop_slug=?").bind(slug).first();
+  if (!shop) return H("<h1>Shop not found</h1>", 404, "no-store");
+  const items = (await db.prepare(
+    "SELECT i.* FROM items i JOIN sales s ON s.id=i.sale_id WHERE s.user_id=? AND i.listing_status='live' AND i.status='available' ORDER BY i.listed_at DESC").bind(shop.id).all()).results;
+  const ids = items.map(i => i.id);
+  let photosBy = {};
+  if (ids.length) {
+    const ph = ids.map(() => "?").join(",");
+    const ps = (await db.prepare(`SELECT * FROM photos WHERE item_id IN (${ph}) ORDER BY sort, created_at`).bind(...ids).all()).results;
+    for (const p of ps) (photosBy[p.item_id] ||= []).push(p);
+  }
+  const cards = items.map(i => { const p = firstPhoto(photosBy[i.id] || []);
+    return `<a class="card" href="/shop/${esc(slug)}/item/${i.id}"><img src="${p ? "/p/" + esc(p.r2_key) : ""}" alt="${esc(i.ai_title || i.name)}" loading="lazy"><div class="b"><div class="t">${esc(i.ai_title || i.name)}</div><div class="p">${money(i.price_cents)}</div></div></a>`; }).join("");
+  const body = items.length ? `<div class="grid">${cards}</div>` : `<div class="empty">Nothing listed yet — check back soon.</div>`;
+  return H(shopPage(shop, shop.shop_name || slug, body));
+}
+
+async function renderItem(db, env, slug, itemId, paid) {
+  const shop = await db.prepare("SELECT id, shop_slug, shop_name, shop_blurb FROM users WHERE shop_slug=?").bind(slug).first();
+  if (!shop) return H("<h1>Shop not found</h1>", 404, "no-store");
+  const b = await itemBundle(db, itemId);
+  if (!b || b.item.listing_status === "draft") return H(shopPage(shop, "Not found", `<div class="empty">Item not found.</div>`), 404, "no-store");
+  const { item, photos, appraisal } = b;
+  const sold = item.status !== "available" || item.listing_status !== "live";
+  const ident = appraisal?.result?.identification || {};
+  const main = firstPhoto(photos);
+  const gallery = photos.length ? `<div class="gal"><img id="mainImg" src="${esc(main.url)}" alt=""><div class="thumbs">${photos.map(p => `<img src="${esc(p.url)}" alt="${esc(p.kind)}" onclick="document.getElementById('mainImg').src=this.src">`).join("")}</div></div>` : `<div class="gal"></div>`;
+  const pills = [ident.maker, ident.period, ident.origin, appraisal?.result?.listing?.condition_grade].filter(Boolean).map(x => `<span class="pill">${esc(x)}</span>`).join("");
+  const buy = sold ? `<div class="meta"><b>Sold</b></div>` : (env.STRIPE_SECRET_KEY
+    ? `<form method="post" action="/api/public/checkout"><input type="hidden" name="item_id" value="${item.id}"><button class="btn">Buy now — ${money(item.price_cents)}</button></form>`
+    : `<div class="meta">Contact the shop to purchase.</div>`);
+  const body = `<div class="item">${gallery}<div>${paid ? `<div class="ok">Thank you — your payment went through.</div>` : ""}
+<h2>${esc(item.ai_title || item.name)}</h2><div style="margin:8px 0">${pills}</div><div class="price">${money(item.price_cents)}</div>
+<div class="desc">${esc(item.ai_description || item.description || "")}</div><div style="margin-top:18px">${buy}</div>
+${item.markings ? `<div class="meta">Marks: ${esc(item.markings)}</div>` : ""}</div></div>`;
+  return H(shopPage(shop, item.ai_title || item.name, body), 200, "no-store");
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const p = url.pathname;
+    const db = env.DB;
+    const parts = p.split("/").filter(Boolean);
+    const m = request.method;
+    try {
+      // ---------- PUBLIC: photos from R2 ----------
+      if (parts[0] === "p" && parts.length >= 2 && m === "GET") {
+        const obj = await env.PHOTOS.get(parts.slice(1).join("/"));
+        if (!obj) return new Response("not found", { status: 404 });
+        return new Response(obj.body, { headers: { "content-type": obj.httpMetadata?.contentType || "image/jpeg", "cache-control": "public, max-age=31536000, immutable", etag: obj.httpEtag } });
+      }
+      // ---------- PUBLIC: storefront ----------
+      if (parts[0] === "shop" && m === "GET") {
+        if (parts.length === 2) return renderShop(db, parts[1]);
+        if (parts.length === 4 && parts[2] === "item") return renderItem(db, env, parts[1], parts[3], url.searchParams.get("paid") === "1");
+        return H("<h1>Not found</h1>", 404, "no-store");
+      }
+      if (!p.startsWith("/api/")) return env.ASSETS.fetch(request);
+
+      // ---------- PUBLIC API: checkout + stripe webhook + shop JSON ----------
+      if (parts[1] === "public") {
+        if (parts[2] === "shop" && parts[3] && m === "GET") {
+          const shop = await db.prepare("SELECT id, shop_slug, shop_name, shop_blurb FROM users WHERE shop_slug=?").bind(parts[3]).first();
+          if (!shop) return J({ error: "not found" }, 404);
+          const items = (await db.prepare("SELECT i.id, i.name, i.ai_title, i.ai_description, i.price_cents, i.listed_at FROM items i JOIN sales s ON s.id=i.sale_id WHERE s.user_id=? AND i.listing_status='live' AND i.status='available' ORDER BY i.listed_at DESC").bind(shop.id).all()).results;
+          return J({ shop: { slug: shop.shop_slug, name: shop.shop_name, blurb: shop.shop_blurb }, items });
+        }
+        if (parts[2] === "checkout" && m === "POST") {
+          if (!env.STRIPE_SECRET_KEY) return J({ error: "online checkout not enabled" }, 503);
+          const ct = request.headers.get("content-type") || "";
+          const itemId = ct.includes("json") ? (await readJson(request)).item_id : (await request.formData()).get("item_id");
+          const row = await db.prepare("SELECT i.*, u.shop_slug, u.shop_name FROM items i JOIN sales s ON s.id=i.sale_id JOIN users u ON u.id=s.user_id WHERE i.id=? AND i.listing_status='live' AND i.status='available'").bind(itemId).first();
+          if (!row) return J({ error: "item unavailable" }, 404);
+          if (row.price_cents < 50) return J({ error: "price too low for card checkout" }, 400);
+          const ph = await db.prepare("SELECT r2_key FROM photos WHERE item_id=? ORDER BY sort, created_at LIMIT 1").bind(row.id).first();
+          const origin = env.PUBLIC_ORIGIN || url.origin;
+          const sess = await stripeCheckout(env, row, row, ph ? `${origin}/p/${ph.r2_key}` : null, origin);
+          await db.prepare("INSERT INTO orders (id,item_id,stripe_session_id,amount_cents,status,created_at) VALUES (?,?,?,?,'pending',?)").bind(uid(), row.id, sess.id, row.price_cents, now()).run();
+          return ct.includes("json") ? J({ url: sess.url }) : Response.redirect(sess.url, 303);
+        }
+        if (parts[2] === "stripe-webhook" && m === "POST") {
+          const raw = await request.text();
+          if (!env.STRIPE_WEBHOOK_SECRET || !(await verifyStripeSig(env, raw, request.headers.get("stripe-signature")))) return J({ error: "bad signature" }, 400);
+          const ev = JSON.parse(raw);
+          if (ev.type === "checkout.session.completed") {
+            const s = ev.data.object;
+            await markSoldOnline(db, s.metadata?.item_id, s.id, s.customer_details?.email);
+          }
+          return J({ received: true });
+        }
+        return J({ error: "not found" }, 404);
+      }
+
+      // ---------- AUTH ----------
+      if (parts[1] === "auth") {
+        const act = parts[2];
+        if (act === "register" && m === "POST") {
+          const b = await readJson(request);
+          const email = (b.email || "").trim().toLowerCase();
+          const pw = b.password || "";
+          if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return J({ error: "Enter a valid email" }, 400);
+          if (pw.length < 8) return J({ error: "Password must be at least 8 characters" }, 400);
+          const exists = await db.prepare("SELECT id FROM users WHERE email=?").bind(email).first();
+          if (exists) return J({ error: "That email is already registered" }, 409);
+          const salt = randHex(16), h = await pbkdf2(pw, salt), id = uid();
+          await db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,created_at) VALUES (?,?,?,?,?)").bind(id, email, h, salt, now()).run();
+          return J({ email }, 200, { "Set-Cookie": sessionCookie(await newSession(db, id)) });
+        }
+        if (act === "login" && m === "POST") {
+          const b = await readJson(request);
+          const email = (b.email || "").trim().toLowerCase();
+          const u = await db.prepare("SELECT * FROM users WHERE email=?").bind(email).first();
+          if (!u) return J({ error: "Wrong email or password" }, 401);
+          const h = await pbkdf2(b.password || "", u.pw_salt);
+          if (!timingEq(h, u.pw_hash)) return J({ error: "Wrong email or password" }, 401);
+          return J({ email }, 200, { "Set-Cookie": sessionCookie(await newSession(db, u.id)) });
+        }
+        if (act === "logout" && m === "POST") {
+          const tok = getCookie(request, "bt_session");
+          if (tok) await db.prepare("DELETE FROM sessions WHERE token=?").bind(tok).run();
+          return J({ ok: true }, 200, { "Set-Cookie": clearCookie });
+        }
+        if (act === "me" && m === "GET") {
+          const uidv = await currentUser(request, db);
+          if (!uidv) return J({ error: "not authenticated" }, 401);
+          const u = await db.prepare("SELECT email, shop_slug, shop_name, shop_blurb FROM users WHERE id=?").bind(uidv).first();
+          return J(u || {});
+        }
+        return J({ error: "not found" }, 404);
+      }
+
+      // ---------- everything below requires a session ----------
+      const userId = await currentUser(request, db);
+      if (!userId) return J({ error: "not authenticated" }, 401);
+      const ownsSale = async (sid) => !!(await db.prepare("SELECT id FROM sales WHERE id=? AND user_id=?").bind(sid, userId).first());
+      const ownsItem = async (iid) => await db.prepare("SELECT i.* FROM items i JOIN sales s ON s.id=i.sale_id WHERE i.id=? AND s.user_id=?").bind(iid, userId).first();
+
+      // ---------- shop settings ----------
+      if (parts[1] === "me" && parts[2] === "shop") {
+        if (m === "GET") return J(await db.prepare("SELECT shop_slug, shop_name, shop_blurb FROM users WHERE id=?").bind(userId).first());
+        if (m === "PUT") {
+          const b = await readJson(request);
+          const slug = slugify(b.slug || b.shop_name);
+          if (slug.length < 3) return J({ error: "slug must be at least 3 characters" }, 400);
+          const taken = await db.prepare("SELECT id FROM users WHERE shop_slug=? AND id<>?").bind(slug, userId).first();
+          if (taken) return J({ error: "that shop address is taken" }, 409);
+          await db.prepare("UPDATE users SET shop_slug=?, shop_name=?, shop_blurb=? WHERE id=?").bind(slug, (b.shop_name || "").trim() || slug, (b.shop_blurb || "").trim() || null, userId).run();
+          return J({ shop_slug: slug, shop_name: (b.shop_name || "").trim() || slug, url: `${env.PUBLIC_ORIGIN || url.origin}/shop/${slug}` });
+        }
+      }
+
+      // ---------- sales ----------
+      if (parts[1] === "sales" && parts.length === 2) {
+        if (m === "GET") {
+          const { results } = await db.prepare(
+            "SELECT s.*, (SELECT COUNT(*) FROM items i WHERE i.sale_id=s.id) AS items, " +
+            "(SELECT COALESCE(SUM(total_cents),0) FROM txns t WHERE t.sale_id=s.id) AS revenue_cents " +
+            "FROM sales s WHERE s.user_id=? ORDER BY created_at DESC").bind(userId).all();
+          return J(results);
+        }
+        if (m === "POST") {
+          const b = await readJson(request);
+          const name = (b.name || "").trim() || "Untitled sale";
+          const id = uid();
+          await db.prepare("INSERT INTO sales (id,name,status,created_at,user_id) VALUES (?,?,'open',?,?)").bind(id, name, now(), userId).run();
+          if (b.seller && b.seller.trim())
+            await db.prepare("INSERT INTO sellers (id,sale_id,name,created_at) VALUES (?,?,?,?)").bind(uid(), id, b.seller.trim(), now()).run();
+          return J({ id, name });
+        }
+      }
+      if (parts[1] === "sales" && parts.length >= 3) {
+        const sid = parts[2];
+        if (!(await ownsSale(sid))) return J({ error: "not found" }, 404);
+        if (parts.length === 3 && m === "GET") {
+          const sale = await db.prepare("SELECT * FROM sales WHERE id=?").bind(sid).first();
+          const sellers = (await db.prepare("SELECT * FROM sellers WHERE sale_id=? ORDER BY created_at").bind(sid).all()).results;
+          const items = (await db.prepare(
+            "SELECT i.*, (SELECT r2_key FROM photos p WHERE p.item_id=i.id ORDER BY p.sort, p.created_at LIMIT 1) AS thumb_key, " +
+            "(SELECT status FROM appraisals a WHERE a.item_id=i.id ORDER BY a.created_at DESC LIMIT 1) AS appraisal_status " +
+            "FROM items i WHERE i.sale_id=? ORDER BY i.created_at DESC").bind(sid).all()).results;
+          const txns = (await db.prepare("SELECT * FROM txns WHERE sale_id=? ORDER BY created_at DESC").bind(sid).all()).results;
+          return J({ sale, sellers, items, txns });
+        }
+        if (parts[3] === "sellers" && m === "POST") {
+          const b = await readJson(request); const name = (b.name || "").trim();
+          if (!name) return J({ error: "name required" }, 400);
+          const id = uid();
+          await db.prepare("INSERT INTO sellers (id,sale_id,name,created_at) VALUES (?,?,?,?)").bind(id, sid, name, now()).run();
+          return J({ id, name });
+        }
+        if (parts[3] === "items" && m === "POST") {
+          const b = await readJson(request);
+          const name = (b.name || "").trim() || "New item";
+          const price_cents = b.price === undefined || b.price === "" || b.price === null ? 0 : Math.round(Number(b.price) * 100);
+          if (!Number.isFinite(price_cents) || price_cents < 0) return J({ error: "bad price" }, 400);
+          const id = uid();
+          await db.prepare("INSERT INTO items (id,sale_id,seller_id,name,price_cents,status,created_at,description,markings) VALUES (?,?,?,?,?,'available',?,?,?)")
+            .bind(id, sid, b.seller_id || null, name, price_cents, now(), (b.description || "").trim() || null, (b.markings || "").trim() || null).run();
+          return J({ id });
+        }
+        if (parts[3] === "checkout" && m === "POST") {
+          const b = await readJson(request);
+          const ids = Array.isArray(b.item_ids) ? b.item_ids.filter(Boolean) : [];
+          if (!ids.length) return J({ error: "no items" }, 400);
+          const ph = ids.map(() => "?").join(",");
+          const rows = (await db.prepare(`SELECT id,price_cents FROM items WHERE sale_id=? AND status='available' AND id IN (${ph})`).bind(sid, ...ids).all()).results;
+          if (!rows.length) return J({ error: "items unavailable" }, 400);
+          const total = rows.reduce((a, r) => a + r.price_cents, 0);
+          const txnId = uid();
+          await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)").bind(txnId, sid, total, rows.length, (b.tender || "cash"), now()).run();
+          const soldIds = rows.map(r => r.id), ph2 = soldIds.map(() => "?").join(",");
+          await db.prepare(`UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status=CASE WHEN listing_status='live' THEN 'hidden' ELSE listing_status END WHERE id IN (${ph2})`).bind(txnId, now(), ...soldIds).run();
+          return J({ txn_id: txnId, total_cents: total, item_count: rows.length });
+        }
+        if (parts[3] === "summary" && m === "GET") {
+          const totals = await db.prepare("SELECT COALESCE(SUM(total_cents),0) AS revenue_cents, COUNT(*) AS txn_count FROM txns WHERE sale_id=?").bind(sid).first();
+          const sold = await db.prepare("SELECT COUNT(*) AS sold_items FROM items WHERE sale_id=? AND status='sold'").bind(sid).first();
+          const avail = await db.prepare("SELECT COUNT(*) AS available_items, COALESCE(SUM(price_cents),0) AS available_cents FROM items WHERE sale_id=? AND status='available'").bind(sid).first();
+          const split = (await db.prepare(
+            "SELECT COALESCE(s.name,'Unassigned') AS seller, COUNT(i.id) AS items, COALESCE(SUM(i.price_cents),0) AS cents " +
+            "FROM items i LEFT JOIN sellers s ON s.id=i.seller_id WHERE i.sale_id=? AND i.status='sold' GROUP BY i.seller_id ORDER BY cents DESC").bind(sid).all()).results;
+          return J({ ...totals, ...sold, ...avail, split });
+        }
+      }
+
+      // ---------- items: photos, appraisal, publish ----------
+      if (parts[1] === "items" && parts.length >= 3) {
+        const iid = parts[2];
+        const item = await ownsItem(iid);
+        if (!item) return J({ error: "not found" }, 404);
+
+        if (parts.length === 3 && m === "GET") return J(await itemBundle(db, iid));
+        if (parts.length === 3 && m === "DELETE") {
+          if (item.status !== "available") return J({ error: "sold items can't be deleted" }, 400);
+          const ps = (await db.prepare("SELECT r2_key FROM photos WHERE item_id=?").bind(iid).all()).results;
+          await Promise.all(ps.map(x => env.PHOTOS.delete(x.r2_key)));
+          await db.prepare("DELETE FROM photos WHERE item_id=?").bind(iid).run();
+          await db.prepare("DELETE FROM appraisals WHERE item_id=?").bind(iid).run();
+          const r = await db.prepare("DELETE FROM items WHERE id=?").bind(iid).run();
+          return J({ deleted: r.meta.changes });
+        }
+        if (parts[3] === "photos" && m === "POST") {
+          const fd = await request.formData();
+          const files = fd.getAll("photos").filter(f => typeof f === "object" && f.size);
+          if (!files.length) return J({ error: "no photos" }, 400);
+          const kinds = String(fd.get("kinds") || "").split(",").map(k => k.trim());
+          const existing = await db.prepare("SELECT COUNT(*) AS n FROM photos WHERE item_id=?").bind(iid).first();
+          if (existing.n + files.length > 12) return J({ error: "max 12 photos per item" }, 400);
+          const out = [];
+          for (let i = 0; i < files.length; i++) {
+            const f = files[i];
+            if (f.size > 10 * 1024 * 1024) return J({ error: `${f.name || "photo"} over 10 MB` }, 413);
+            const ctype = f.type || "image/jpeg";
+            const ext = ctype.includes("png") ? "png" : ctype.includes("webp") ? "webp" : ctype.includes("heic") ? "heic" : "jpg";
+            const key = `${iid}/${uid()}.${ext}`;
+            await env.PHOTOS.put(key, f.stream(), { httpMetadata: { contentType: ctype } });
+            const kind = PHOTO_KINDS.has(kinds[i]) ? kinds[i] : "other";
+            const id = uid();
+            await db.prepare("INSERT INTO photos (id,item_id,r2_key,kind,content_type,bytes,sort,created_at) VALUES (?,?,?,?,?,?,?,?)")
+              .bind(id, iid, key, kind, ctype, f.size, existing.n + i, now()).run();
+            out.push({ id, kind, url: `/p/${key}` });
+          }
+          return J({ photos: out });
+        }
+        if (parts[3] === "appraise" && m === "POST") {
+          const photos = (await db.prepare("SELECT * FROM photos WHERE item_id=? ORDER BY sort, created_at").bind(iid).all()).results;
+          if (!photos.length) return J({ error: "add at least one photo first" }, 400);
+          if (!env.APPRAISER_URL) return J({ error: "appraiser not configured" }, 503);
+          const b = await readJson(request);
+          if (b.description !== undefined || b.markings !== undefined) {
+            await db.prepare("UPDATE items SET description=COALESCE(?,description), markings=COALESCE(?,markings) WHERE id=?")
+              .bind(b.description ?? null, b.markings ?? null, iid).run();
+            item.description = b.description ?? item.description; item.markings = b.markings ?? item.markings;
+          }
+          const apId = uid();
+          await db.prepare("INSERT INTO appraisals (id,item_id,status,created_at) VALUES (?,?,'pending',?)").bind(apId, iid, now()).run();
+          ctx.waitUntil(runAppraisal(env, apId, item, photos));
+          return J({ appraisal_id: apId, status: "pending" }, 202);
+        }
+        if (parts[3] === "publish" && m === "POST") {
+          const b = await readJson(request);
+          const u = await db.prepare("SELECT shop_slug FROM users WHERE id=?").bind(userId).first();
+          if (!u.shop_slug) return J({ error: "set up your shop address first" }, 400);
+          const status = b.listing_status === "hidden" ? "hidden" : "live";
+          const price_cents = b.price === undefined ? item.price_cents : Math.round(Number(b.price) * 100);
+          if (!Number.isFinite(price_cents) || price_cents < 0) return J({ error: "bad price" }, 400);
+          if (status === "live" && price_cents <= 0) return J({ error: "set a price before listing" }, 400);
+          await db.prepare("UPDATE items SET ai_title=COALESCE(?,ai_title), ai_description=COALESCE(?,ai_description), price_cents=?, listing_status=?, listed_at=COALESCE(listed_at,?) WHERE id=?")
+            .bind((b.title || "").trim() || null, (b.description || "").trim() || null, price_cents, status, now(), iid).run();
+          return J({ listing_status: status, url: `${env.PUBLIC_ORIGIN || url.origin}/shop/${u.shop_slug}/item/${iid}` });
+        }
+      }
+      if (parts[1] === "photos" && parts.length === 3 && m === "DELETE") {
+        const ph = await db.prepare("SELECT p.* FROM photos p JOIN items i ON i.id=p.item_id JOIN sales s ON s.id=i.sale_id WHERE p.id=? AND s.user_id=?").bind(parts[2], userId).first();
+        if (!ph) return J({ error: "not found" }, 404);
+        await env.PHOTOS.delete(ph.r2_key);
+        await db.prepare("DELETE FROM photos WHERE id=?").bind(ph.id).run();
+        return J({ deleted: 1 });
+      }
+      return J({ error: "not found" }, 404);
+    } catch (e) {
+      return J({ error: String(e && e.message || e) }, 500);
+    }
+  }
+};

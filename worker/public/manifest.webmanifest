@@ -1,0 +1,12 @@
+{
+  "name": "Bottle Tree — Run a Sale",
+  "short_name": "Bottle Tree",
+  "description": "Price it, sell it, split it. Sell antiques and run garage sales from your phone.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0F6B59",
+  "theme_color": "#0F6B59",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
