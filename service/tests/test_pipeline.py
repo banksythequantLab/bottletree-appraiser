@@ -21,6 +21,8 @@ class FakeNebius:
         self.text_calls: list[str] = []
 
     async def vision_json(self, prompt, image_data_urls, max_tokens=900):
+        if prompt.startswith("Transcribe ALL text"):
+            return {"text": ["STICKLEY", "stickley"]}   # OCR pass; dupe should collapse
         self.vision_calls += 1
         kind = prompt.split('labelled "')[1].split('"')[0]
         return {
@@ -77,6 +79,8 @@ def test_appraise_runs_vision_per_photo_and_merges(monkeypatch):
     assert out.confidence == pytest.approx(0.82)
     assert out.price_range.low == 300 and out.price_range.high == 600
     assert "STICKLEY" in out.transcribed_text
+    assert sum(1 for t in out.transcribed_text if t.upper() == "STICKLEY") == 1   # OCR dupes collapsed
+    assert "Stickley red decal" in out.transcribed_text                            # dealer markings kept
     assert out.item_id == "item-1"
     assert any("no live comparables" in w for w in out.warnings)
     # evidence sheet carried the dealer markings to the reasoner
@@ -119,6 +123,42 @@ def test_extract_json_handles_fences_and_preamble():
     assert extract_json('thinking... {"a": {"b": 2}} trailing')["a"]["b"] == 2
     with pytest.raises(ValueError):
         extract_json("no json here")
+
+
+def test_extract_json_repairs_truncated_output():
+    # exactly the shape the 3B VLM produced when it hit max_tokens mid-list
+    cut = '```json\n{\n  "object_type": "stoneware crock",\n  "materials": ["clay"],\n  "construction": ["cylindrical body", "two lug handles", "The crock is cyl'
+    out = extract_json(cut)
+    assert out["object_type"] == "stoneware crock" and out["materials"] == ["clay"]
+    assert out["construction"][:2] == ["cylindrical body", "two lug handles"]
+    # truncated right after a key
+    assert extract_json('{"a": [1, 2], "b": {"c": "x"}, "d":')["a"] == [1, 2]
+    # truncated inside a nested object
+    assert extract_json('{"a": {"b": {"c": 1, "d": "ok')["a"]["b"]["c"] == 1
+
+
+def test_small_model_echoes_are_scrubbed(monkeypatch):
+    nb = FakeNebius()
+
+    async def echo(system, user, max_tokens=1800):
+        return {"identification": {"name": ""}, "confidence": 0,
+                "evidence": ["The specific observation and what it implies: wear"],
+                "transcribed_text": ["consolidated, de-duplicated marks/text"],
+                "price_range": {"low": 0, "high": 0, "basis": "one sentence on how you priced it: dealer prices"},
+                "listing": {"title": "", "description": ""}, "questions_for_dealer": ["one or two things that would help"]}
+
+    nb.text_json = echo  # type: ignore[assignment]
+
+    async def no_comps(q, limit=5):
+        return []
+
+    monkeypatch.setattr(pipeline, "search_comps", no_comps)
+    out = asyncio.run(pipeline.appraise(nb, _req(1), fake_resolve))
+    assert out.identification.name == "oak side chair"          # fell back to the vision object_type
+    assert out.evidence == [] and out.questions_for_dealer == []
+    assert all("consolidated" not in t for t in out.transcribed_text)
+    assert any("no price" in w for w in out.warnings)
+    assert out.listing.title == "oak side chair"
 
 
 def test_price_normalisation_swaps_and_clamps():

@@ -246,6 +246,37 @@ export default {
         return J({ error: "not found" }, 404);
       }
 
+      // ---------- DEVICE (Jetson kiosk) intake: X-Device-Key instead of a session ----------
+      if (parts[1] === "device" && parts[2] === "intake" && m === "POST") {
+        const key = request.headers.get("x-device-key") || "";
+        const owner = key ? await db.prepare("SELECT id FROM users WHERE device_key=?").bind(key).first() : null;
+        if (!owner) return J({ error: "bad device key" }, 401);
+        const fd = await request.formData();
+        const files = fd.getAll("photos").filter(f => typeof f === "object" && f.size);
+        if (!files.length) return J({ error: "no photos" }, 400);
+        const kinds = String(fd.get("kinds") || "").split(",").map(k => k.trim());
+        let sale = await db.prepare("SELECT id FROM sales WHERE user_id=? AND name='Kiosk intake' AND status='open'").bind(owner.id).first();
+        if (!sale) { sale = { id: uid() }; await db.prepare("INSERT INTO sales (id,name,status,created_at,user_id) VALUES (?,?,'open',?,?)").bind(sale.id, "Kiosk intake", now(), owner.id).run(); }
+        let ap = null; try { ap = JSON.parse(String(fd.get("appraisal") || "")); } catch {}
+        const title = String(fd.get("title") || "").trim() || ap?.listing?.title || "Kiosk item";
+        const price_cents = Math.max(0, Math.round(Number(fd.get("price") || ap?.price_range?.suggested_retail || 0) * 100)) || 0;
+        const itemId = uid();
+        await db.prepare("INSERT INTO items (id,sale_id,name,price_cents,status,created_at,description,markings,ai_title,ai_description,source) VALUES (?,?,?,?,'available',?,?,?,?,?,'kiosk')")
+          .bind(itemId, sale.id, title, price_cents, now(), String(fd.get("description") || "") || null, String(fd.get("markings") || "") || null,
+                ap?.listing?.title || null, ap?.listing?.description || null).run();
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i], ctype = f.type || "image/jpeg";
+          const ext = ctype.includes("png") ? "png" : ctype.includes("webp") ? "webp" : "jpg";
+          const rkey = `${itemId}/${uid()}.${ext}`;
+          await env.PHOTOS.put(rkey, f.stream(), { httpMetadata: { contentType: ctype } });
+          await db.prepare("INSERT INTO photos (id,item_id,r2_key,kind,content_type,bytes,sort,created_at) VALUES (?,?,?,?,?,?,?,?)")
+            .bind(uid(), itemId, rkey, PHOTO_KINDS.has(kinds[i]) ? kinds[i] : "other", ctype, f.size, i, now()).run();
+        }
+        if (ap) await db.prepare("INSERT INTO appraisals (id,item_id,status,result_json,model_text,model_vision,created_at,completed_at) VALUES (?,?,'done',?,?,?,?,?)")
+          .bind(uid(), itemId, JSON.stringify(ap), ap.models?.text || null, ap.models?.vision || null, now(), now()).run();
+        return J({ item_id: itemId, sale_id: sale.id, photos: files.length });
+      }
+
       // ---------- AUTH ----------
       if (parts[1] === "auth") {
         const act = parts[2];
@@ -289,6 +320,13 @@ export default {
       if (!userId) return J({ error: "not authenticated" }, 401);
       const ownsSale = async (sid) => !!(await db.prepare("SELECT id FROM sales WHERE id=? AND user_id=?").bind(sid, userId).first());
       const ownsItem = async (iid) => await db.prepare("SELECT i.* FROM items i JOIN sales s ON s.id=i.sale_id WHERE i.id=? AND s.user_id=?").bind(iid, userId).first();
+
+      // ---------- device key (for the counter kiosk) ----------
+      if (parts[1] === "me" && parts[2] === "device-key") {
+        if (m === "GET") { const u = await db.prepare("SELECT device_key FROM users WHERE id=?").bind(userId).first(); return J({ device_key: u.device_key || null }); }
+        if (m === "POST") { const k = "btd_" + randHex(20); await db.prepare("UPDATE users SET device_key=? WHERE id=?").bind(k, userId).run(); return J({ device_key: k }); }
+        if (m === "DELETE") { await db.prepare("UPDATE users SET device_key=NULL WHERE id=?").bind(userId).run(); return J({ ok: true }); }
+      }
 
       // ---------- shop settings ----------
       if (parts[1] === "me" && parts[2] === "shop") {

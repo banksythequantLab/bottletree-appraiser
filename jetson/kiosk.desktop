@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Bottle Tree Kiosk
+Exec=bash @REPO@/jetson/kiosk.sh
+X-GNOME-Autostart-enabled=true
+NoDisplay=false

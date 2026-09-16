@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bottle Tree — Counter Appraiser</title>
+<style>
+:root{--bg:#F4ECDC;--panel:#FBF6EA;--panel2:#EFE4CC;--ink:#241B10;--sub:#6A5B44;--line:#E0D2B4;--green:#0F6B59;--cobalt:#1E44C4;--rust:#B4552B;--gold:#B8862F}
+@media(prefers-color-scheme:dark){:root{--bg:#161210;--panel:#211B15;--panel2:#2A2219;--ink:#F1E7D4;--sub:#B7A889;--line:#3A2F22;--green:#3FBBA0;--cobalt:#7C9BFF;--rust:#E38657;--gold:#E0B458}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:"Nunito Sans",system-ui,sans-serif;font-size:18px;line-height:1.4;overflow:hidden}
+h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:600;margin:0}
+.app{display:grid;grid-template-columns:1.25fr 1fr;height:100vh;gap:14px;padding:14px}
+@media(max-width:900px){.app{grid-template-columns:1fr;grid-template-rows:auto 1fr;overflow:auto}}
+.cam{position:relative;background:#000;border-radius:18px;overflow:hidden;display:flex;flex-direction:column;min-height:300px}
+video{width:100%;height:100%;object-fit:cover;flex:1;background:#000}
+.hud{position:absolute;top:14px;left:14px;right:14px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none}
+.hud .tag{background:rgba(0,0,0,.55);color:#fff;padding:8px 14px;border-radius:12px;font-weight:800;backdrop-filter:blur(6px)}
+.hud .hint{background:rgba(0,0,0,.55);color:#fff;padding:8px 14px;border-radius:12px;font-size:.9rem;max-width:55%;backdrop-filter:blur(6px)}
+.shutter{position:absolute;bottom:18px;left:0;right:0;display:flex;justify-content:center;gap:16px;align-items:center}
+.shutter button{border:0;cursor:pointer;font-weight:800}
+.snap{width:84px;height:84px;border-radius:50%;background:#fff;border:6px solid rgba(255,255,255,.45)!important;font-size:1.6rem}
+.skip,.redo{background:rgba(0,0,0,.55);color:#fff;padding:12px 18px;border-radius:14px;font-size:1rem}
+.side{display:flex;flex-direction:column;gap:12px;overflow:auto;min-height:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px}
+.strip{display:flex;gap:8px;flex-wrap:wrap}
+.strip .t{width:82px;text-align:center;font-size:.72rem;color:var(--sub);font-weight:800;cursor:pointer}
+.strip .t .ph{width:82px;height:82px;border-radius:12px;border:2px dashed var(--line);display:flex;align-items:center;justify-content:center;background:var(--bg);overflow:hidden;font-size:1.4rem}
+.strip .t.done .ph{border:2px solid var(--green)}
+.strip .t.cur .ph{border:3px solid var(--cobalt)}
+.strip img{width:100%;height:100%;object-fit:cover}
+label{display:block;font-size:.72rem;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--sub);margin:0 0 4px}
+textarea,input{width:100%;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--ink);font:inherit;font-size:1.05rem}
+.btn{background:var(--green);color:#fff;border:0;border-radius:14px;padding:18px;font-weight:800;font-size:1.15rem;width:100%;cursor:pointer}
+.btn.sec{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
+.btn:disabled{opacity:.5}
+.muted{color:var(--sub)}
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.kpi{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:12px}
+.kpi .n{font-family:Fraunces,serif;font-size:1.7rem;color:var(--green)}
+.kpi .l{font-size:.8rem;color:var(--sub)}
+.pill{display:inline-block;font-size:.72rem;font-weight:800;padding:3px 10px;border-radius:20px;background:var(--panel2);color:var(--sub);margin-right:6px;white-space:nowrap}
+ul.ev{margin:6px 0 0;padding-left:20px;font-size:.95rem}
+.status{position:fixed;left:14px;bottom:10px;font-size:.75rem;color:var(--sub);background:var(--panel);border:1px solid var(--line);padding:4px 10px;border-radius:20px}
+.spin{display:inline-block;width:18px;height:18px;border:3px solid var(--line);border-top-color:var(--green);border-radius:50%;animation:s 1s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes s{to{transform:rotate(360deg)}}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="cam">
+    <video id="v" autoplay playsinline muted></video>
+    <canvas id="c" class="hidden"></canvas>
+    <div class="hud"><span class="tag" id="tag">Front</span><span class="hint" id="hint">Whole item, straight on</span></div>
+    <div class="shutter">
+      <button class="redo" id="redo">↺ Redo</button>
+      <button class="snap" id="snap">●</button>
+      <button class="skip" id="skip">Skip ›</button>
+    </div>
+  </div>
+  <div class="side">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2>Counter appraiser</h2><span class="muted" id="brain" style="font-size:.8rem"></span></div>
+      <div class="strip" id="strip"></div>
+    </div>
+    <div class="card" id="form">
+      <label>What do you know about it?</label>
+      <textarea id="desc" rows="2" placeholder="Estate in Rhinebeck, came with a matching table…"></textarea>
+      <div style="height:10px"></div>
+      <label>Any writing, stamps or marks</label>
+      <input id="marks" placeholder="Type exactly what you can read">
+      <div style="height:12px"></div>
+      <button class="btn" id="go" disabled>✨ Identify &amp; price</button>
+    </div>
+    <div class="card hidden" id="busy"><span class="spin"></span><span id="busyMsg">Reading photos…</span></div>
+    <div class="card hidden" id="result"></div>
+    <div class="card hidden" id="save">
+      <label>Listing title</label><input id="title">
+      <div style="height:8px"></div>
+      <label>Price</label><input id="price" inputmode="decimal">
+      <div style="height:12px"></div>
+      <button class="btn" id="saveBtn">✓ Save to Bottle Tree</button>
+      <div style="height:8px"></div>
+      <button class="btn sec" id="reset">Next item</button>
+    </div>
+  </div>
+</div>
+<div class="status" id="status">starting…</div>
+<script>
+const SHOTS = [
+  ["front","Front","Whole item, straight on, good light"],
+  ["back","Back","Reverse side"],
+  ["underside","Underside / inside","Joinery, base, foot rim, interior"],
+  ["marks","Marks & labels","Stamps, signatures, labels — close and sharp"],
+  ["detail","Detail","Decoration, hardware, texture"],
+  ["damage","Damage","Chips, repairs, wear (optional)"],
+];
+const $ = s => document.querySelector(s);
+const v = $("#v"), c = $("#c");
+let shots = {}, cur = 0, last = null;
+
+async function startCam() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    v.srcObject = s;
+  } catch (e) { $("#hint").textContent = "No camera: " + e.message; }
+}
+function renderStrip() {
+  $("#strip").innerHTML = SHOTS.map(([k, l], i) => `<div class="t ${shots[k] ? "done" : ""} ${i === cur ? "cur" : ""}" data-i="${i}">
+    <div class="ph">${shots[k] ? `<img src="${shots[k].url}">` : "📷"}</div>${l}</div>`).join("");
+  $("#strip").querySelectorAll(".t").forEach(t => t.onclick = () => { cur = +t.dataset.i; setCur(); });
+  $("#go").disabled = !Object.keys(shots).length;
+}
+function setCur() {
+  if (cur >= SHOTS.length) cur = SHOTS.length - 1;
+  $("#tag").textContent = SHOTS[cur][1]; $("#hint").textContent = SHOTS[cur][2]; renderStrip();
+}
+function snap() {
+  if (!v.videoWidth) return;
+  const max = 1600, s = Math.min(1, max / Math.max(v.videoWidth, v.videoHeight));
+  c.width = Math.round(v.videoWidth * s); c.height = Math.round(v.videoHeight * s);
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  c.toBlob(b => { shots[SHOTS[cur][0]] = { blob: b, url: URL.createObjectURL(b) }; cur = Math.min(cur + 1, SHOTS.length - 1); setCur(); }, "image/jpeg", 0.88);
+}
+$("#snap").onclick = snap;
+$("#skip").onclick = () => { cur = Math.min(cur + 1, SHOTS.length - 1); setCur(); };
+$("#redo").onclick = () => { delete shots[SHOTS[cur][0]]; renderStrip(); };
+document.addEventListener("keydown", e => {
+  const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+  if ((e.key === " " || e.key === "Enter") && !typing) { e.preventDefault(); snap(); }
+});
+
+function fd() {
+  const f = new FormData(); const kinds = [];
+  for (const [k] of SHOTS) if (shots[k]) { f.append("photos", shots[k].blob, k + ".jpg"); kinds.push(k); }
+  f.append("kinds", kinds.join(",")); f.append("description", $("#desc").value); f.append("markings", $("#marks").value);
+  return f;
+}
+const esc = s => String(s ?? "").replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+$("#go").onclick = async () => {
+  $("#form").classList.add("hidden"); $("#busy").classList.remove("hidden"); $("#result").classList.add("hidden"); $("#save").classList.add("hidden");
+  const msgs = ["Reading photos…", "Looking for marks…", "Thinking like an appraiser…", "Checking comparables…"]; let i = 0;
+  const t = setInterval(() => { $("#busyMsg").textContent = msgs[Math.min(++i, msgs.length - 1)]; }, 6000);
+  try {
+    const r = await fetch("/appraise/upload", { method: "POST", body: fd() });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    last = await r.json(); showResult(last);
+  } catch (e) {
+    $("#result").innerHTML = `<b style="color:var(--rust)">Couldn't appraise:</b> ${esc(e.message)}<div style="height:10px"></div><button class="btn sec" id="again">Try again</button>`;
+    $("#result").classList.remove("hidden"); $("#again").onclick = () => { $("#result").classList.add("hidden"); $("#form").classList.remove("hidden"); };
+  } finally { clearInterval(t); $("#busy").classList.add("hidden"); }
+};
+function showResult(r) {
+  const p = r.price_range, id = r.identification;
+  $("#result").innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><h3 style="font-size:1.3rem">${esc(id.name)}</h3><span class="pill">${Math.round(r.confidence * 100)}% sure</span></div>
+    <div class="muted">${[id.maker, id.period, id.origin, id.style].filter(Boolean).map(esc).join(" · ")}</div>
+    <div class="kpis"><div class="kpi"><div class="n">$${Math.round(p.low)}–$${Math.round(p.high)}</div><div class="l">Price range</div></div>
+      <div class="kpi"><div class="n">$${Math.round(p.suggested_retail)}</div><div class="l">Suggested · floor $${Math.round(p.floor)}</div></div></div>
+    <div class="muted" style="font-size:.9rem">${esc(p.basis)}</div>
+    ${r.evidence.length ? `<ul class="ev">${r.evidence.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}
+    ${r.transcribed_text.length ? `<div class="muted" style="font-size:.85rem;margin-top:8px">Read on item: ${r.transcribed_text.map(esc).join(" · ")}</div>` : ""}
+    ${r.questions_for_dealer.length ? `<div class="muted" style="font-size:.85rem;margin-top:6px">Would help: ${r.questions_for_dealer.map(esc).join(" · ")}</div>` : ""}
+    <div class="muted" style="font-size:.72rem;margin-top:8px">${esc(r.models.brain)} · ${esc(r.models.text)} + ${esc(r.models.vision)}</div>`;
+  $("#result").classList.remove("hidden");
+  $("#title").value = r.listing.title; $("#price").value = Math.round(p.suggested_retail).toFixed(2);
+  $("#save").classList.remove("hidden");
+}
+$("#saveBtn").onclick = async () => {
+  const f = fd(); f.append("appraisal", JSON.stringify(last)); f.append("title", $("#title").value); f.append("price", $("#price").value);
+  $("#saveBtn").disabled = true; $("#saveBtn").textContent = "Saving…";
+  try { const r = await (await fetch("/kiosk/save", { method: "POST", body: f })).json();
+    $("#saveBtn").textContent = r.synced ? "✓ Saved & synced" : `✓ Saved (${r.pending} waiting for Wi-Fi)`; }
+  catch (e) { $("#saveBtn").textContent = "Save failed — " + e.message; $("#saveBtn").disabled = false; }
+};
+$("#reset").onclick = () => { shots = {}; cur = 0; last = null; $("#desc").value = ""; $("#marks").value = "";
+  $("#result").classList.add("hidden"); $("#save").classList.add("hidden"); $("#form").classList.remove("hidden");
+  $("#saveBtn").disabled = false; $("#saveBtn").textContent = "✓ Save to Bottle Tree"; setCur(); };
+
+async function status() {
+  try { const h = await (await fetch("/health")).json(); const b = h.brains;
+    const active = b.mode === "edge" ? "edge" : b.mode === "cloud" ? "cloud" : (b.cloud && b.cloud.reachable ? "cloud" : "edge");
+    $("#brain").textContent = active === "cloud" ? "☁ Nemotron on Nebius" : "⚡ on-device Nemotron";
+    $("#status").textContent = `${b.mode} mode · ${h.outbox_pending} waiting to sync`; }
+  catch { $("#status").textContent = "service offline"; }
+}
+startCam(); setCur(); status(); setInterval(status, 30000); setInterval(() => fetch("/kiosk/sync", { method: "POST" }).catch(() => {}), 120000);
+</script>
+</body>
+</html>

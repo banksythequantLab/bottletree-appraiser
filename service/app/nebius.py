@@ -14,34 +14,49 @@ log = logging.getLogger("appraiser.nebius")
 
 
 class Nebius:
-    def __init__(self, api_key: str | None = None, base_url: str | None = None):
+    """One OpenAI-compatible brain. `kind` is "cloud" (Nebius Token Factory) or "edge" (local Ollama etc.)."""
+
+    def __init__(self, api_key: str | None = None, base_url: str | None = None,
+                 text_model: str | None = None, vision_model: str | None = None, kind: str = "cloud"):
+        self.kind = kind
         self.client = AsyncOpenAI(
             api_key=api_key or settings.nebius_api_key or "missing",
             base_url=base_url or settings.nebius_base_url,
+            timeout=120 if kind == "cloud" else 600,   # small edge GPUs are slow on first token
         )
-        self.text_model = settings.text_model
-        self.vision_model = settings.vision_model
+        self.text_model = text_model or settings.text_model
+        self.vision_model = vision_model or settings.vision_model
         self.available: list[str] = []
+        self.reachable: bool | None = None
+
+    @classmethod
+    def edge(cls) -> "Nebius":
+        return cls(api_key="local", base_url=settings.local_base_url, text_model=settings.local_text_model,
+                   vision_model=settings.local_vision_model, kind="edge")
 
     async def probe(self) -> dict[str, Any]:
-        """List models the key can see; resolve vision_model if set to 'auto'."""
+        """List models the endpoint serves; resolve vision_model if set to 'auto'."""
         try:
             resp = await self.client.models.list()
             self.available = sorted(m.id for m in resp.data)
+            self.reachable = True
         except Exception as e:  # noqa: BLE001
-            log.warning("model probe failed: %s", e)
+            log.warning("[%s] model probe failed: %s", self.kind, e)
             self.available = []
+            self.reachable = False
         if self.vision_model == "auto":
             pick = next((c for c in settings.vision_candidates if c in self.available), None)
             self.vision_model = pick or settings.vision_candidates[0]
             log.info("vision model resolved to %s (%s)", self.vision_model, "listed" if pick else "unverified")
         text_ok = self.text_model in self.available if self.available else None
         return {
+            "kind": self.kind,
+            "reachable": self.reachable,
             "text_model": self.text_model,
             "text_model_listed": text_ok,
             "vision_model": self.vision_model,
             "vision_model_listed": (self.vision_model in self.available) if self.available else None,
-            "nvidia_models_available": [m for m in self.available if m.lower().startswith("nvidia/")],
+            "nvidia_models_available": [m for m in self.available if "nvidia" in m.lower() or "nemotron" in m.lower()],
             "model_count": len(self.available),
         }
 
@@ -53,34 +68,47 @@ class Nebius:
             model=self.vision_model,
             messages=[{"role": "user", "content": content}],
             max_tokens=max_tokens,
-            temperature=0.1,
+            temperature=0.0,
         )
-        return extract_json(r.choices[0].message.content or "")
+        text = r.choices[0].message.content or ""
+        try:
+            return extract_json(text)
+        except ValueError:
+            log.info("vision output was not JSON (finish=%s): %r", r.choices[0].finish_reason, text[:300])
+            raise
 
     async def text_json(self, system: str, user: str, max_tokens: int = 1800) -> dict[str, Any]:
         kwargs: dict[str, Any] = dict(
             model=self.text_model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             max_tokens=max_tokens,
-            temperature=0.2,
+            temperature=0.0 if self.kind == "edge" else 0.2,
         )
         try:
             r = await self.client.chat.completions.create(response_format={"type": "json_object"}, **kwargs)
         except Exception as e:  # noqa: BLE001 — some endpoints reject response_format; retry plain
             log.info("json_object unsupported (%s); retrying without response_format", e)
             r = await self.client.chat.completions.create(**kwargs)
-        return extract_json(r.choices[0].message.content or "")
+        text = r.choices[0].message.content or ""
+        try:
+            return extract_json(text)
+        except ValueError:
+            log.info("text output was not JSON (finish=%s): %r", r.choices[0].finish_reason, text[:300])
+            raise
 
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 
 
 def extract_json(text: str) -> dict[str, Any]:
-    """Pull the first JSON object out of model output (handles fences, reasoning preambles)."""
+    """Pull the first JSON object out of model output (handles fences, reasoning preambles, and
+    answers cut off by max_tokens — those are repaired by closing the open strings/arrays/objects)."""
     text = text.strip()
     m = _FENCE.search(text)
     if m:
         text = m.group(1).strip()
+    elif text.startswith("```"):                      # opening fence, no closing one (truncated)
+        text = text.split("\n", 1)[1] if "\n" in text else ""
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -96,4 +124,55 @@ def extract_json(text: str) -> dict[str, Any]:
             depth -= 1
             if depth == 0:
                 return json.loads(text[start : i + 1])
+    repaired = repair_truncated_json(text[start:])
+    if repaired is not None:
+        log.info("repaired truncated JSON from model output")
+        return repaired
     raise ValueError("unterminated JSON object in model output")
+
+
+def repair_truncated_json(text: str, max_backoff: int = 40) -> dict[str, Any] | None:
+    """Close whatever is open at the end of a truncated JSON document. If that doesn't parse, back off to
+    the previous comma and try again — dropping the partial trailing element each time."""
+    cut = len(text)
+    for _ in range(max_backoff):
+        chunk = text[:cut].rstrip()
+        candidate = _close_open(chunk)
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        cut = chunk.rfind(",")
+        if cut <= 0:
+            return None
+    return None
+
+
+def _close_open(chunk: str) -> str:
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for ch in chunk:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "[{":
+            stack.append("]" if ch == "[" else "}")
+        elif ch in "]}" and stack:
+            stack.pop()
+    out = chunk + ('"' if in_str else "")
+    out = out.rstrip()
+    if out.endswith(","):
+        out = out[:-1]
+    if out.endswith(":"):                             # dangling key with no value
+        out = out[: out.rfind(",")] if "," in out else out + " null"
+    return out + "".join(reversed(stack))

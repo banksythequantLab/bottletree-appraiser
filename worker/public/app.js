@@ -300,8 +300,21 @@ async function renderShopSetup(done) {
       <label>Tagline (optional)</label><input id="sBlurb" value="${esc(me.shop_blurb || "")}" placeholder="Antiques, curiosities and estate finds in Hudson, NY">
       <div style="height:12px"></div>
       <button class="btn" id="sSave">Save shop</button><div style="height:6px"></div><button class="btn sec" id="sBack">Back</button>
+    </div>
+    <div class="card">
+      <label>Counter kiosk (Jetson)</label>
+      <div class="muted" style="font-size:.85rem">Items appraised on the counter kiosk land here. Paste this key into the kiosk's BOTTLETREE_DEVICE_KEY.</div>
+      <div style="height:8px"></div>
+      <input id="dKey" readonly placeholder="no device key yet" style="font-family:monospace;font-size:.85rem">
+      <div style="height:8px"></div>
+      <div class="row"><button class="btn sec sm" id="dNew">Generate new key</button><button class="btn sec sm" id="dCopy">Copy</button><button class="btn rust sm" id="dRevoke">Revoke</button></div>
     </div>`;
   $("#sBack").onclick = done;
+  const loadKey = async () => { const k = await api("/me/device-key"); $("#dKey").value = k.device_key || ""; };
+  loadKey();
+  $("#dNew").onclick = async () => { if ($("#dKey").value && !confirm("Replace the current kiosk key? The old one stops working.")) return; await api("/me/device-key", { method: "POST" }); toast("New kiosk key"); loadKey(); };
+  $("#dCopy").onclick = () => { navigator.clipboard?.writeText($("#dKey").value); toast("Copied"); };
+  $("#dRevoke").onclick = async () => { if (!confirm("Revoke the kiosk key?")) return; await api("/me/device-key", { method: "DELETE" }); toast("Revoked"); loadKey(); };
   $("#sSave").onclick = async () => {
     try { await api("/me/shop", { method: "PUT", body: JSON.stringify({ shop_name: $("#sName").value, slug: $("#sSlug").value, shop_blurb: $("#sBlurb").value }) }); toast("Shop saved"); done(); }
     catch (e) { toast(e.message); }

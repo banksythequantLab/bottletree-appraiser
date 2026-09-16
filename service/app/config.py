@@ -28,8 +28,26 @@ def _csv(name: str, default: list[str]) -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()] or default
 
 
+# Edge (Jetson / offline) defaults — any OpenAI-compatible local server; Ollama by default.
+# nemotron-mini = NVIDIA Nemotron-Mini-4B (fits a Jetson Orin Nano 8 GB alongside a 3B VLM).
+DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1/"
+DEFAULT_LOCAL_TEXT_MODEL = "nemotron-mini"
+DEFAULT_LOCAL_VISION_MODEL = "qwen2.5vl:3b"
+
+
 @dataclass
 class Settings:
+    # cloud  = Nebius Token Factory only (hackathon default)
+    # edge   = local OpenAI-compatible server only (Jetson kiosk, no internet)
+    # auto   = cloud when reachable, otherwise edge (kiosk with flaky store Wi-Fi)
+    mode: str = field(default_factory=lambda: os.getenv("APPRAISER_MODE", "cloud").lower())
+    local_base_url: str = field(default_factory=lambda: os.getenv("LOCAL_BASE_URL", DEFAULT_LOCAL_BASE_URL))
+    local_text_model: str = field(default_factory=lambda: os.getenv("LOCAL_TEXT_MODEL", DEFAULT_LOCAL_TEXT_MODEL))
+    local_vision_model: str = field(default_factory=lambda: os.getenv("LOCAL_VISION_MODEL", DEFAULT_LOCAL_VISION_MODEL))
+    # Kiosk → Bottle Tree sync (optional). Device key is issued per shop in the Bottle Tree app.
+    bottletree_url: str = field(default_factory=lambda: os.getenv("BOTTLETREE_URL", "").rstrip("/"))
+    bottletree_device_key: str = field(default_factory=lambda: os.getenv("BOTTLETREE_DEVICE_KEY", ""))
+    outbox_dir: str = field(default_factory=lambda: os.getenv("OUTBOX_DIR", "outbox"))
     nebius_api_key: str = field(default_factory=lambda: os.getenv("NEBIUS_API_KEY", ""))
     nebius_base_url: str = field(
         default_factory=lambda: os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1/")
