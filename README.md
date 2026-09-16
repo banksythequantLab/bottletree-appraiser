@@ -5,8 +5,9 @@ price range with evidence, and a ready-to-approve listing — then sell it in th
 
 Built by [Banksy AI LLC](https://github.com/banksythequantLab) for the
 **Nebius × NVIDIA Global AI Hackathon** — Tracks: **Best Apps & Agents** (phone app + storefront, Nemotron on
-Nebius) and **Physical AI** (the same appraiser on a Jetson at the shop counter, camera + touchscreen,
-works offline on on-device Nemotron — see [`jetson/`](jetson/README.md)).
+Nebius) and **Physical AI** (the same appraiser as a counter kiosk on an NVIDIA edge box with a USB camera,
+working offline on on-device Nemotron — demoed on an RTX 2060 laptop + Logitech BRIO, Jetson-ready; see
+[`jetson/`](jetson/README.md)).
 
 ## How it works
 

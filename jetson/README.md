@@ -1,7 +1,11 @@
-# Counter kiosk on NVIDIA Jetson (Physical AI track)
+# Counter kiosk on an NVIDIA edge box (Physical AI track)
 
-The same appraisal service that runs on Nebius AI Cloud runs on a Jetson at the shop counter, with a
-USB camera and a touchscreen, and keeps working when the store's internet doesn't.
+The same appraisal service that runs on Nebius AI Cloud runs on a small NVIDIA box at the shop counter,
+with a USB camera and a touchscreen, and keeps working when the store's internet doesn't.
+
+**Our demo unit is a laptop with an RTX 2060 (6 GB) and a Logitech BRIO on an arm over a neutral mat** —
+the kiosk is hardware-agnostic: anything that runs Ollama with a CUDA GPU works. The Jetson notes below are
+for the Orin Nano dev kit (the track prize); the Windows launch commands are at the bottom.
 
 ```
    USB camera ──▶ Chromium --kiosk (http://127.0.0.1:8080/kiosk) ──▶ FastAPI service (APPRAISER_MODE=auto)
@@ -64,6 +68,21 @@ Single front photo of a stamped 5-gallon Jos. Bayer crock, dealer typed the mark
 
 Expect the Orin Nano to be 2–3× slower than the 2060 (shared 8 GB, lower TOPS); the UI cycles
 "Reading photos… / Looking for marks… / Thinking like an appraiser…" so the wait reads as work, not a hang.
+
+## Running the kiosk on a Windows NVIDIA laptop (what we demo on)
+
+```
+ollama pull nemotron-mini ; ollama pull qwen2.5vl:3b
+cd service ; copy .env.example .env        # set APPRAISER_MODE=auto (or edge for the offline demo)
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8080
+start chrome --kiosk --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required http://127.0.0.1:8080/kiosk
+```
+
+Chrome will pick the default camera; if it grabs the laptop's built-in webcam instead of the BRIO, set the
+BRIO as default under Windows Settings → Bluetooth & devices → Cameras, or pick it once in the Chrome
+camera prompt (drop `--use-fake-ui-for-media-stream` to get the prompt). Space or Enter takes a shot.
+Pull the Wi-Fi mid-demo: the badge flips from "☁ Nemotron on Nebius" to "⚡ on-device Nemotron" and the
+next appraisal still comes back.
 
 ## Tuning
 
