@@ -11,3 +11,5 @@ node_modules/
 Thumbs.db
 service/outbox/
 service/last_run/
+demo/
+service/last_run_keep/

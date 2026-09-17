@@ -70,9 +70,9 @@ class Nebius:
             content.append({"type": "image_url", "image_url": {"url": url}})
         kwargs: dict[str, Any] = {}
         if self.kind == "edge":
-            # small VLMs at temperature 0 loop ("token repeat limit reached" from Ollama); a little
-            # heat plus a presence penalty keeps them moving without making them creative
-            kwargs.update(temperature=0.2 if temperature is None else temperature, presence_penalty=0.6, frequency_penalty=0.3)
+            # a little heat keeps small VLMs from looping; big token budget because qwen3-vl thinks first
+            kwargs.update(temperature=0.2 if temperature is None else temperature)
+            max_tokens = max(max_tokens, 3000)
         else:
             # Token Factory vision endpoints sometimes queue a call for minutes; don't let the SDK's own
             # 2 retries x 120 s hide that — fail fast and let the caller fall through to the next model.

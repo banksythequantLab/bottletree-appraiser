@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from .comps import search_comps
+from .config import settings
 from .nebius import Nebius
 from .schemas import (Appraisal, AppraiseRequest, Comparable, Identification, Listing, PhotoFindings,
                       PriceRange)
@@ -97,7 +99,8 @@ async def _photo_findings(nb: Nebius, kind: str, data_url: str) -> PhotoFindings
     3B model truncate its JSON, so edge runs them one after the other."""
     if getattr(nb, "kind", "cloud") == "edge":
         raw = await _safe_vision(nb, VISION_PROMPT.format(kind=kind), data_url, 900, "findings")
-        ocr = await _safe_vision(nb, OCR_PROMPT, data_url, 300, "ocr")
+        # the findings prompt already asks for transcribed_text; a second OCR pass doubles edge latency
+        ocr = None if settings.edge_single_pass else await _safe_vision(nb, OCR_PROMPT, data_url, 300, "ocr")
     else:
         raw, ocr = await asyncio.gather(
             _safe_vision(nb, VISION_PROMPT.format(kind=kind), data_url, 900, "findings"),
@@ -201,6 +204,12 @@ def build_evidence_sheet(req: AppraiseRequest, findings: list[PhotoFindings]) ->
 async def appraise(nb: Nebius, req: AppraiseRequest, resolve_photo) -> Appraisal:
     """`resolve_photo(url) -> data_url` turns http(s) URLs or data URLs into base64 data URLs."""
     warnings: list[str] = []
+    if getattr(nb, "kind", "cloud") == "edge" and len(req.photos) > settings.edge_max_photos:
+        # small GPU: keep the most informative shots (marks first, then front, then the rest)
+        order = {"marks": 0, "front": 1, "detail": 2, "back": 3, "underside": 4, "damage": 5, "other": 6}
+        keep = sorted(req.photos, key=lambda p: order.get(p.kind, 9))[: settings.edge_max_photos]
+        warnings.append(f"on-device: used {len(keep)} of {len(req.photos)} photos ({', '.join(p.kind for p in keep)})")
+        req = req.model_copy(update={"photos": keep})
     data_urls = await asyncio.gather(*(resolve_photo(p.url) for p in req.photos))
     # Cap concurrent photos: 6 photos x 2 passes = 12 simultaneous vision calls got 7 of them queued for
     # ~2 min on Token Factory. Three photos at a time (6 in-flight calls) stayed fast in testing.
@@ -233,6 +242,15 @@ async def appraise(nb: Nebius, req: AppraiseRequest, resolve_photo) -> Appraisal
     if not ident.name.strip():
         # tiny edge models sometimes leave name blank — fall back to what the vision pass saw
         ident.name = next((f.object_type for f in findings if f.object_type), "Unidentified item")
+    if _ignores_dealer(ident.name, req.description):
+        # Small on-device reasoners sometimes name the item after a single photo guess ("fireplace tool") and
+        # drop the dealer's own words entirely. The dealer standing at the counter outranks a 4B model's glance.
+        warnings.append(f"model named it '{ident.name}'; using the dealer's description for the name instead")
+        ident.name = _dealer_name(req.description)
+    if req.markings.strip() and not ident.maker.strip():
+        maker = _maker_from_marks(req.markings)
+        if maker:
+            ident.maker = maker
     price = _price(first.get("price_range", {}), req.currency)
     listing = Listing(**_pick(first.get("listing", {}) | {"title": first.get("listing", {}).get("title") or ident.name,
                                                           "description": first.get("listing", {}).get("description") or ""},
@@ -303,6 +321,41 @@ def _comps_query(ident: Identification) -> str:
             seen.add(k)
             words.append(w.strip("."))
     return " ".join(words[:10]) or ident.name
+
+
+_STOP = {"a", "an", "the", "and", "or", "of", "with", "from", "in", "on", "for", "to", "is", "it", "its", "this",
+         "that", "has", "no", "not", "very", "old", "antique", "vintage", "piece", "item", "heavy", "small", "large",
+         # materials / colours say nothing about WHAT the thing is — a "cast iron fireplace tool" is not a
+         # "cast iron fluting iron" just because both are cast iron
+         "cast", "iron", "brass", "copper", "tin", "steel", "metal", "wood", "wooden", "oak", "pine", "glass",
+         "ceramic", "pottery", "stoneware", "porcelain", "black", "brown", "white", "red", "green", "blue"}
+
+
+def _words(s: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z][a-z'-]{2,}", s.lower()) if w not in _STOP}
+
+
+def _ignores_dealer(name: str, description: str) -> bool:
+    """True when the dealer's opening clause names the item and the model's name shares no content word with it."""
+    dw = _words(_dealer_name(description))
+    return bool(dw) and bool(name.strip()) and not (_words(name) & dw)
+
+
+def _dealer_name(description: str) -> str:
+    """First clause of the dealer's description, capped at ten words — 'Cast iron fluting iron with crank handle'."""
+    head = re.split(r"[.;,\n]", description.strip(), maxsplit=1)[0]
+    return " ".join(head.split()[:10]).strip() or description.strip()[:80]
+
+
+_MAKER_SUFFIX = r"(?:CO\.?|COMPANY|MFG\.?|MANUFACTURING|BROS\.?|BROTHERS|& SONS?|INC\.?|LTD\.?|WORKS|POTTERY|FOUNDRY)"
+
+
+def _maker_from_marks(marks: str) -> str:
+    """Pull an obvious maker name out of dealer-typed marks: 'SHEPARD HARDWARE CO. PAT'D ...' -> 'Shepard Hardware Co.'"""
+    m = re.search(rf"\b((?:[A-Z][A-Z'&.-]*\s+){{0,4}}{_MAKER_SUFFIX})(?=\s|$|,)", marks.upper())
+    if not m:
+        return ""
+    return " ".join(w.capitalize() if not w.startswith("&") else w for w in m.group(1).split())
 
 
 def _score(d: dict[str, Any]) -> int:

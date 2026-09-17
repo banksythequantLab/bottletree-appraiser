@@ -205,3 +205,17 @@ def test_price_normalisation_swaps_and_clamps():
     assert p.suggested_retail == 750.0
     assert pipeline._clamp(85) == 0.85
     assert pipeline._clamp("0.4") == 0.4
+
+
+def test_dealer_description_outranks_photo_guess():
+    desc = "Cast iron fluting iron with crank handle and corrugated rollers, from a Hudson Valley estate."
+    assert pipeline._ignores_dealer("Cast iron fireplace tool", desc)
+    assert not pipeline._ignores_dealer("Shepard Hardware fluting iron", desc)
+    assert not pipeline._ignores_dealer("Stoneware crock", "")
+    assert pipeline._dealer_name(desc) == "Cast iron fluting iron with crank handle and corrugated rollers"
+
+
+def test_maker_from_dealer_marks():
+    assert pipeline._maker_from_marks("SHEPARD HARDWARE CO. PAT'D NOV 12 DEC 17 1878 BUFFALO N.Y.") == "Shepard Hardware Co."
+    assert pipeline._maker_from_marks("Red Wing Union Stoneware Co. 5") == "Red Wing Union Stoneware Co."
+    assert pipeline._maker_from_marks("made in england 1953") == ""

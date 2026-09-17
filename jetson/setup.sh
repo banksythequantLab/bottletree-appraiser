@@ -7,7 +7,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 KIOSK_USER="${SUDO_USER:-$USER}"
 TEXT_MODEL="${LOCAL_TEXT_MODEL:-nemotron-mini}"       # NVIDIA Nemotron-Mini-4B
-VISION_MODEL="${LOCAL_VISION_MODEL:-qwen2.5vl:3b}"    # 3B VLM; fits Orin Nano 8 GB alongside the text model
+VISION_MODEL="${LOCAL_VISION_MODEL:-gemma3:4b}"    # 4B VLM, no thinking mode; fits Orin Nano 8 GB alongside the text model
 
 echo "== apt"
 apt-get update -qq

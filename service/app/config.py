@@ -35,7 +35,14 @@ def _csv(name: str, default: list[str]) -> list[str]:
 # nemotron-mini = NVIDIA Nemotron-Mini-4B (fits a Jetson Orin Nano 8 GB alongside a 3B VLM).
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1/"
 DEFAULT_LOCAL_TEXT_MODEL = "nemotron-mini"
-DEFAULT_LOCAL_VISION_MODEL = "qwen2.5vl:3b"
+# Vision model, measured 2026-09-17 on an RTX 2060 6 GB with real Logitech BRIO frames:
+#   qwen2.5vl:3b  — aborts in Ollama ("token repeat limit reached") on many frames, deterministic per image.
+#   qwen3-vl:4b   — never aborts but thinks 3-7k tokens first (Ollama ignores think=false): 35-80 s per photo,
+#                   often finish=length with empty content; a 4-photo run took 4.5 min.
+#   gemma3:4b     — no thinking, clean JSON, 4-10 s per photo; weak at reading worn stamps, which is fine because
+#                   the dealer types the marks and IDENTIFY_SYSTEM ranks dealer text above photo guesses.
+# Edge still uses ONE combined pass per photo and caps photos at EDGE_MAX_PHOTOS to keep a counter run short.
+DEFAULT_LOCAL_VISION_MODEL = "gemma3:4b"
 
 
 @dataclass
@@ -47,6 +54,8 @@ class Settings:
     local_base_url: str = field(default_factory=lambda: os.getenv("LOCAL_BASE_URL", DEFAULT_LOCAL_BASE_URL))
     local_text_model: str = field(default_factory=lambda: os.getenv("LOCAL_TEXT_MODEL", DEFAULT_LOCAL_TEXT_MODEL))
     local_vision_model: str = field(default_factory=lambda: os.getenv("LOCAL_VISION_MODEL", DEFAULT_LOCAL_VISION_MODEL))
+    edge_max_photos: int = field(default_factory=lambda: int(os.getenv("EDGE_MAX_PHOTOS", "6")))
+    edge_single_pass: bool = field(default_factory=lambda: os.getenv("EDGE_SINGLE_PASS", "1") == "1")
     # Kiosk → Bottle Tree sync (optional). Device key is issued per shop in the Bottle Tree app.
     bottletree_url: str = field(default_factory=lambda: os.getenv("BOTTLETREE_URL", "").rstrip("/"))
     bottletree_device_key: str = field(default_factory=lambda: os.getenv("BOTTLETREE_DEVICE_KEY", ""))

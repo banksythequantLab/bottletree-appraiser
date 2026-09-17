@@ -11,7 +11,7 @@ for the Orin Nano dev kit (the track prize); the Windows launch commands are at 
    USB camera ──▶ Chromium --kiosk (http://127.0.0.1:8080/kiosk) ──▶ FastAPI service (APPRAISER_MODE=auto)
                                                                           │
                                         online  ───────────────────────────┼──▶ Nebius Token Factory: Nemotron 3 Super + VL model
-                                        offline ───────────────────────────┴──▶ Ollama on the Jetson GPU: nemotron-mini (NVIDIA) + qwen2.5vl:3b
+                                        offline ───────────────────────────┴──▶ Ollama on the Jetson GPU: nemotron-mini (NVIDIA) + gemma3:4b
                                                                           │
                                                           outbox/ on disk ─┴──▶ Bottle Tree /api/device/intake when Wi-Fi returns
 ```
@@ -34,7 +34,7 @@ bash jetson/kiosk.sh     # or reboot — it autostarts on the desktop session
 ```
 
 `setup.sh` installs Ollama (its installer ships the Jetson CUDA build), pulls `nemotron-mini` (NVIDIA
-Nemotron-Mini-4B, ~2.7 GB) and `qwen2.5vl:3b` (~3.2 GB), installs the service as a systemd unit, and
+Nemotron-Mini-4B, ~2.7 GB) and `gemma3:4b` (~3.3 GB), installs the service as a systemd unit, and
 adds a Chromium kiosk autostart. Both models stay resident (`OLLAMA_KEEP_ALIVE=-1`) so the first
 appraisal of the day isn't slow.
 
@@ -60,7 +60,7 @@ and list online from the phone app.
 
 Single front photo of a stamped 5-gallon Jos. Bayer crock, dealer typed the markings:
 
-- ~55 s end-to-end fully offline (two vision passes + Nemotron Mini), first run of the day.
+- ~60 s end-to-end fully offline (one vision pass per photo + Nemotron Mini) on an RTX 2060 6 GB.
 - Identification correct (maker, town, capacity), confidence 0.9, $100–150 range, no cloud.
 - The 3B VLM read "JOS. BAYR / WASHINGTON, MO." — one letter off. This is why the kiosk asks the
   dealer to type the marks: a human reading a worn stamp beats a 3B model, and dealer text is weighted
@@ -72,7 +72,7 @@ Expect the Orin Nano to be 2–3× slower than the 2060 (shared 8 GB, lower TOPS
 ## Running the kiosk on a Windows NVIDIA laptop (what we demo on)
 
 ```
-ollama pull nemotron-mini ; ollama pull qwen2.5vl:3b
+ollama pull nemotron-mini ; ollama pull gemma3:4b
 cd service ; copy .env.example .env        # set APPRAISER_MODE=auto (or edge for the offline demo)
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8080
 start chrome --kiosk --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required http://127.0.0.1:8080/kiosk
@@ -86,6 +86,8 @@ next appraisal still comes back.
 
 ## Tuning
 
-- Bigger Jetson? `LOCAL_TEXT_MODEL=nemotron-3-nano` / `qwen2.5vl:7b` in `.env` and re-run setup.
+- Bigger Jetson? `LOCAL_TEXT_MODEL=nemotron-3-nano` / `gemma3:12b` in `.env` and re-run setup.
+- Why gemma3:4b and not a Qwen VLM: on real BRIO frames qwen2.5vl:3b aborts in Ollama ("token repeat limit reached") and qwen3-vl:4b thinks for 35-80 s per photo, often returning nothing. gemma3:4b answers in 4-10 s with clean JSON. It is weak at reading worn stamps, so the dealer types the marks and the reasoner is told dealer text outranks photo guesses; a deterministic guard also keeps the dealer's own wording as the item name if a small model drifts ("fireplace tool" for a fluting iron).
+- Capture hygiene: hands out of frame before pressing the shutter, marks shot as close and flat as possible.
 - Slow camera? Lower the capture size in `service/kiosk/index.html` (`max = 1600`).
 - Logs: `journalctl -u bottletree-appraiser -f`; model health: `curl -s :8080/health | jq .brains`.
