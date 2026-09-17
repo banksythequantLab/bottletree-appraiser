@@ -60,15 +60,23 @@ class Nebius:
             "model_count": len(self.available),
         }
 
-    async def vision_json(self, prompt: str, image_data_urls: list[str], max_tokens: int = 900) -> dict[str, Any]:
+    async def vision_json(self, prompt: str, image_data_urls: list[str], max_tokens: int = 900,
+                          temperature: float | None = None) -> dict[str, Any]:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for url in image_data_urls:
             content.append({"type": "image_url", "image_url": {"url": url}})
+        kwargs: dict[str, Any] = {}
+        if self.kind == "edge":
+            # small VLMs at temperature 0 loop ("token repeat limit reached" from Ollama); a little
+            # heat plus a presence penalty keeps them moving without making them creative
+            kwargs.update(temperature=0.2 if temperature is None else temperature, presence_penalty=0.6, frequency_penalty=0.3)
+        else:
+            kwargs.update(temperature=0.1 if temperature is None else temperature)
         r = await self.client.chat.completions.create(
             model=self.vision_model,
             messages=[{"role": "user", "content": content}],
             max_tokens=max_tokens,
-            temperature=0.0,
+            **kwargs,
         )
         text = r.choices[0].message.content or ""
         try:

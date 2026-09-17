@@ -34,7 +34,10 @@ Keep it short: at most 4 items per list, each item under 12 words. No prose outs
 IDENTIFY_SYSTEM = """You are a senior antiques appraiser writing for an independent antique dealer.
 You reason from EVIDENCE: photo findings from a vision model, the dealer's own description, and any
 markings the dealer transcribed by hand (treat dealer markings as more reliable than OCR).
+The per-photo object_type guesses come from a small vision model looking at ONE angle each and often
+disagree with each other; the dealer's description, the transcribed marks and patent dates outrank them.
 Give a confident identification when the evidence supports it, and an honest confidence when it does not.
+If unsure of value, still give a WIDE non-zero price range rather than zeros.
 Prices are realistic secondary-market dealer prices in {currency} for the stated condition, not insurance values.
 Always return ONLY one JSON object matching the schema you are given. No prose outside the JSON."""
 
@@ -78,7 +81,9 @@ async def _safe_vision(nb: Nebius, prompt: str, data_url: str, max_tokens: int, 
     last: Exception | None = None
     for attempt in (1, 2):
         try:
-            return await nb.vision_json(prompt, [data_url], max_tokens=max_tokens)
+            # second attempt runs warmer: a looping model needs a different sample, not the same one again
+            return await nb.vision_json(prompt, [data_url], max_tokens=max_tokens,
+                                        temperature=None if attempt == 1 else 0.6)
         except Exception as e:  # noqa: BLE001
             last = e
             log.info("%s pass attempt %d failed: %s", label, attempt, e)
@@ -101,7 +106,7 @@ async def _photo_findings(nb: Nebius, kind: str, data_url: str) -> PhotoFindings
     if raw is None and ocr is None:
         return PhotoFindings(kind=kind, error="vision model returned no usable output (both passes failed)")
     raw = raw or {}
-    ocr_text = _strs((ocr or {}).get("text"))
+    ocr_text = _clean_ocr(_strs((ocr or {}).get("text")))
     return PhotoFindings(
         kind=kind,
         object_type=str(raw.get("object_type", "")),
@@ -127,18 +132,51 @@ def _dedupe(xs: list[str]) -> list[str]:
 # Hint strings small models are known to echo back; drop them if they show up as values.
 _ECHOES = ("one sentence on how you priced", "consolidated, de-duplicated", "the specific observation and what it implies",
            "short bullet", "2-3 paragraphs", "<= 80 chars", "one or two things")
+# OCR prompt vocabulary the VLM sometimes returns as if it were text it saw.
+_OCR_ECHOES = {"stamps", "impressed marks", "cobalt numbers", "labels", "signatures", "model numbers",
+               "hand-written notes", "each distinct line or mark, verbatim", "text", "none", "no text"}
 
 
-def _clean(xs: list[str]) -> list[str]:
-    return [x for x in xs if not any(e in x.lower() for e in _ECHOES)]
+def _clean(xs: list[str], max_len: int = 200) -> list[str]:
+    """Drop echoed hints and over-long entries (a 4B model pasted whole evidence-sheet lines as 'evidence')."""
+    return [x for x in xs if not any(e in x.lower() for e in _ECHOES) and len(x) <= max_len]
+
+
+def _clean_ocr(xs: list[str]) -> list[str]:
+    return [x for x in xs if x.strip().lower().strip(".;:") not in _OCR_ECHOES]
+
+
+PRICE_SYSTEM = """You are an antiques dealer setting a retail price. You MUST answer with numbers even when unsure:
+give a wide range rather than zeros. Return ONLY JSON:
+{"low": 0, "high": 0, "suggested_retail": 0, "floor": 0, "currency": "USD", "basis": ""}"""
+
+
+async def _price_only(nb: Nebius, ident: Identification, grade: str, currency: str) -> dict[str, Any]:
+    """Fallback for small models that identify an item but leave the price at zero."""
+    user = (f"Item: {ident.name}\nMaker: {ident.maker or 'unknown'}\nOrigin: {ident.origin or 'unknown'}\n"
+            f"Period: {ident.period or 'unknown'}\nCondition: {grade or 'Good'}\nCurrency: {currency}\n"
+            f"Typical secondary-market dealer retail price range in whole dollars?")
+    return await nb.text_json(PRICE_SYSTEM, user, max_tokens=300)
 
 
 def _strs(v: Any) -> list[str]:
+    """Coerce model output to a list of strings. Small models sometimes return objects where a
+    string was asked for ({"observation": ..., "implication": ...}) — flatten those to prose."""
     if v is None:
         return []
     if isinstance(v, str):
         return [v] if v.strip() else []
-    return [str(x) for x in v if str(x).strip()]
+    if isinstance(v, dict):
+        v = [v]
+    out = []
+    for x in v:
+        if isinstance(x, dict):
+            s = " — ".join(str(val) for val in x.values() if str(val).strip())
+        else:
+            s = str(x)
+        if s.strip():
+            out.append(s)
+    return out
 
 
 def build_evidence_sheet(req: AppraiseRequest, findings: list[PhotoFindings]) -> str:
@@ -189,13 +227,22 @@ async def appraise(nb: Nebius, req: AppraiseRequest, resolve_photo) -> Appraisal
         # tiny edge models sometimes leave name blank — fall back to what the vision pass saw
         ident.name = next((f.object_type for f in findings if f.object_type), "Unidentified item")
     price = _price(first.get("price_range", {}), req.currency)
-    if price.high <= 0:
-        warnings.append("model returned no price; enter one by hand or re-run with the cloud brain")
-    price.basis = _clean([price.basis])[0] if _clean([price.basis]) else price.basis
     listing = Listing(**_pick(first.get("listing", {}) | {"title": first.get("listing", {}).get("title") or ident.name,
                                                           "description": first.get("listing", {}).get("description") or ""},
                               Listing))
     listing.condition_grade = _grade(listing.condition_grade)
+    if price.high <= 0:
+        # narrow, separate pricing call — small models that won't price inside the big schema will here
+        try:
+            p2 = _price(await _price_only(nb, ident, listing.condition_grade, req.currency), req.currency)
+            if p2.high > 0:
+                price = p2
+                warnings.append("price came from a second, pricing-only pass")
+        except Exception as e:  # noqa: BLE001
+            log.info("pricing-only pass failed: %s", e)
+    if price.high <= 0:
+        warnings.append("model returned no price; enter one by hand or re-run with the cloud brain")
+    price.basis = _clean([price.basis])[0] if _clean([price.basis]) else price.basis
     comparables: list[Comparable] = []
 
     query = " ".join(x for x in (ident.maker, ident.name, ident.period) if x).strip() or ident.name

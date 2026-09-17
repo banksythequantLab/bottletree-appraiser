@@ -5,6 +5,7 @@ Edge:  the same code on a Jetson at the shop counter, calling local Ollama (Nemo
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import mimetypes
 from contextlib import asynccontextmanager
@@ -115,7 +116,36 @@ async def appraise_upload(
     """Multipart variant for direct phone/browser/kiosk uploads (no Bottle Tree in the loop)."""
     items = await _read_uploads(photos, kinds)
     req = AppraiseRequest(photos=items, description=description, markings=markings, item_id=item_id)
-    return await appraise(nb, req, resolve_photo)
+    result = await appraise(nb, req, resolve_photo)
+    _state["last"] = result          # debugging aid for the kiosk: GET /last
+    _save_last_run(items, req, result)
+    return result
+
+
+def _save_last_run(items: list[PhotoIn], req: AppraiseRequest, result: Appraisal) -> None:
+    """Keep the most recent kiosk run on disk (photos + result) so prompts can be tuned against real shots.
+    Overwritten every run; directory is git-ignored."""
+    try:
+        d = Path(settings.outbox_dir).parent / "last_run"
+        d.mkdir(parents=True, exist_ok=True)
+        for old in d.iterdir():
+            old.unlink()
+        for i, p in enumerate(items):
+            head, b64 = p.url.split(",", 1)
+            ext = "png" if "png" in head else "jpg"
+            (d / f"{i:02d}-{p.kind}.{ext}").write_bytes(base64.b64decode(b64))
+        (d / "request.json").write_text(json.dumps({"description": req.description, "markings": req.markings,
+                                                     "kinds": [p.kind for p in items]}, indent=1))
+        (d / "result.json").write_text(result.model_dump_json(indent=1))
+    except Exception as e:  # noqa: BLE001
+        log.info("could not save last run: %s", e)
+
+
+@app.get("/last")
+async def last():
+    """Most recent appraisal from this process (kiosk debugging; not persisted)."""
+    r = _state.get("last")
+    return r.model_dump() if r else {"last": None}
 
 
 # ---------- kiosk (Jetson at the counter) ----------

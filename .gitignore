@@ -10,3 +10,4 @@ node_modules/
 .DS_Store
 Thumbs.db
 service/outbox/
+service/last_run/

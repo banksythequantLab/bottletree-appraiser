@@ -20,7 +20,7 @@ class FakeNebius:
         self.vision_calls = 0
         self.text_calls: list[str] = []
 
-    async def vision_json(self, prompt, image_data_urls, max_tokens=900):
+    async def vision_json(self, prompt, image_data_urls, max_tokens=900, temperature=None):
         if prompt.startswith("Transcribe ALL text"):
             return {"text": ["STICKLEY", "stickley"]}   # OCR pass; dupe should collapse
         self.vision_calls += 1
@@ -103,7 +103,7 @@ def test_appraise_reprices_with_comps(monkeypatch):
 def test_vision_failure_is_survivable(monkeypatch):
     nb = FakeNebius()
 
-    async def boom(prompt, urls, max_tokens=900):
+    async def boom(prompt, urls, max_tokens=900, temperature=None):
         raise RuntimeError("model down")
 
     nb.vision_json = boom  # type: ignore[assignment]
@@ -159,6 +159,37 @@ def test_small_model_echoes_are_scrubbed(monkeypatch):
     assert all("consolidated" not in t for t in out.transcribed_text)
     assert any("no price" in w for w in out.warnings)
     assert out.listing.title == "oak side chair"
+
+
+def test_pricing_only_fallback_and_ocr_echo_filter(monkeypatch):
+    nb = FakeNebius()
+    calls = []
+
+    async def text(system, user, max_tokens=1800):
+        calls.append(system[:30])
+        if system.startswith("You are an antiques dealer setting"):
+            return {"low": 40, "high": 120, "suggested_retail": 85, "floor": 40, "basis": "typical fluter"}
+        return {"identification": {"name": "Shepard fluting iron", "maker": "Shepard Hardware Co."}, "confidence": 0.9,
+                "evidence": ["x" * 400, "PAT'D 1878 stamp - dates it"], "price_range": {"low": 0, "high": 0},
+                "listing": {"title": "t", "description": "d", "condition_grade": "no chips"}}
+
+    async def vision(prompt, urls, max_tokens=900, temperature=None):
+        if prompt.startswith("Transcribe ALL text"):
+            return {"text": ["SHEPARD HARDWARE CO.", "stamps", "impressed marks", "labels"]}
+        return {"object_type": "cast iron thing", "transcribed_text": []}
+
+    nb.text_json = text; nb.vision_json = vision  # type: ignore[assignment]
+
+    async def no_comps(q, limit=5):
+        return []
+
+    monkeypatch.setattr(pipeline, "search_comps", no_comps)
+    out = asyncio.run(pipeline.appraise(nb, _req(1), fake_resolve))
+    assert out.price_range.low == 40 and out.price_range.high == 120
+    assert any("pricing-only" in w for w in out.warnings)
+    assert out.evidence == ["PAT'D 1878 stamp - dates it"]                       # 400-char paste dropped
+    assert out.photo_findings[0].transcribed_text == ["SHEPARD HARDWARE CO."]     # prompt vocab dropped
+    assert out.listing.condition_grade == "Very good"
 
 
 def test_price_normalisation_swaps_and_clamps():
