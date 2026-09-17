@@ -86,6 +86,11 @@ class Nebius:
             raise
 
     async def text_json(self, system: str, user: str, max_tokens: int = 1800) -> dict[str, Any]:
+        if self.kind == "cloud":
+            # Nemotron 3 Super is a reasoning model: its thinking shares the completion budget with the answer
+            # (measured: ~550 tokens / 5.6 s for a one-line pricing question, and a better price than with
+            # thinking disabled). Give it room or it hits finish=length with an empty content.
+            max_tokens = max(max_tokens, 6000)
         kwargs: dict[str, Any] = dict(
             model=self.text_model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],

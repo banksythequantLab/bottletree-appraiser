@@ -13,13 +13,16 @@ DEFAULT_TEXT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
 # Vision candidates, tried in order at startup against /v1/models. First one the key can see wins.
 # NVIDIA models first so the vision leg is also NVIDIA when Token Factory serves one.
+# Verified 2026-09-17 against a Token Factory account: none of the Nemotron models there accept images
+# (Super/Nano/Lightning all return "does not support image input"); google/gemma-3-27b-it reads a worn
+# cast-iron stamp correctly in ~2.5 s, openbmb/MiniCPM-V-4_5 is faster but sloppier. NVIDIA VL names stay
+# first so the kiosk upgrades itself the day one is served.
 DEFAULT_VISION_CANDIDATES = [
     "nvidia/nemotron-3-nano-omni-30b-a3b",
     "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL",
-    "nvidia/Nemotron-Nano-12B-v2-VL",
-    "Qwen/Qwen2.5-VL-72B-Instruct",
-    "Qwen/Qwen2-VL-72B-Instruct",
     "google/gemma-3-27b-it",
+    "openbmb/MiniCPM-V-4_5",
+    "Qwen/Qwen2.5-VL-72B-Instruct",
 ]
 
 

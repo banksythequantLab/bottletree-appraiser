@@ -135,8 +135,8 @@ def _save_last_run(items: list[PhotoIn], req: AppraiseRequest, result: Appraisal
             ext = "png" if "png" in head else "jpg"
             (d / f"{i:02d}-{p.kind}.{ext}").write_bytes(base64.b64decode(b64))
         (d / "request.json").write_text(json.dumps({"description": req.description, "markings": req.markings,
-                                                     "kinds": [p.kind for p in items]}, indent=1))
-        (d / "result.json").write_text(result.model_dump_json(indent=1))
+                                                     "kinds": [p.kind for p in items]}, indent=1), encoding="utf-8")
+        (d / "result.json").write_text(result.model_dump_json(indent=1), encoding="utf-8")  # Windows default is cp1252
     except Exception as e:  # noqa: BLE001
         log.info("could not save last run: %s", e)
 
