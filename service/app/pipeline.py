@@ -202,8 +202,15 @@ async def appraise(nb: Nebius, req: AppraiseRequest, resolve_photo) -> Appraisal
     """`resolve_photo(url) -> data_url` turns http(s) URLs or data URLs into base64 data URLs."""
     warnings: list[str] = []
     data_urls = await asyncio.gather(*(resolve_photo(p.url) for p in req.photos))
-    findings = await asyncio.gather(*(_photo_findings(nb, p.kind, d) for p, d in zip(req.photos, data_urls)))
-    findings = list(findings)
+    # Cap concurrent photos: 6 photos x 2 passes = 12 simultaneous vision calls got 7 of them queued for
+    # ~2 min on Token Factory. Three photos at a time (6 in-flight calls) stayed fast in testing.
+    sem = asyncio.Semaphore(3 if getattr(nb, "kind", "cloud") == "cloud" else 1)
+
+    async def one(p, d):
+        async with sem:
+            return await _photo_findings(nb, p.kind, d)
+
+    findings = list(await asyncio.gather(*(one(p, d) for p, d in zip(req.photos, data_urls))))
     if all(f.error for f in findings):
         warnings.append("vision model failed on every photo; appraisal relies on dealer text only")
 
@@ -245,7 +252,7 @@ async def appraise(nb: Nebius, req: AppraiseRequest, resolve_photo) -> Appraisal
     price.basis = _clean([price.basis])[0] if _clean([price.basis]) else price.basis
     comparables: list[Comparable] = []
 
-    query = " ".join(x for x in (ident.maker, ident.name, ident.period) if x).strip() or ident.name
+    query = _comps_query(ident)
     hits = await search_comps(query)
     if hits:
         reprice_user = (
@@ -281,6 +288,21 @@ async def appraise(nb: Nebius, req: AppraiseRequest, resolve_photo) -> Appraisal
         models={"text": nb.text_model, "vision": nb.vision_model, "brain": getattr(nb, "kind", "cloud")},
         warnings=warnings,
     )
+
+
+def _comps_query(ident: Identification) -> str:
+    """maker + name without repeating words ('Shepard Hardware Co. Shepard Hardware Co. Cuff Iron' -> once),
+    period stripped of 'c.' noise. Search engines do better with 4-8 clean tokens."""
+    words: list[str] = []
+    seen: set[str] = set()
+    for chunk in (ident.maker, ident.name, ident.period):
+        for w in (chunk or "").replace(",", " ").split():
+            k = w.lower().strip(".")
+            if k in ("c", "ca", "circa", "usa", "co", "inc") or k in seen:
+                continue
+            seen.add(k)
+            words.append(w.strip("."))
+    return " ".join(words[:10]) or ident.name
 
 
 def _score(d: dict[str, Any]) -> int:

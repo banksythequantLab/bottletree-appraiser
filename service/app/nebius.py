@@ -26,6 +26,7 @@ class Nebius:
         )
         self.text_model = text_model or settings.text_model
         self.vision_model = vision_model or settings.vision_model
+        self.vision_fallbacks: list[str] = []   # other listed candidates, used when the primary times out
         self.available: list[str] = []
         self.reachable: bool | None = None
 
@@ -48,6 +49,8 @@ class Nebius:
             pick = next((c for c in settings.vision_candidates if c in self.available), None)
             self.vision_model = pick or settings.vision_candidates[0]
             log.info("vision model resolved to %s (%s)", self.vision_model, "listed" if pick else "unverified")
+        if self.kind == "cloud":
+            self.vision_fallbacks = [c for c in settings.vision_candidates if c in self.available and c != self.vision_model]
         text_ok = self.text_model in self.available if self.available else None
         return {
             "kind": self.kind,
@@ -71,13 +74,23 @@ class Nebius:
             # heat plus a presence penalty keeps them moving without making them creative
             kwargs.update(temperature=0.2 if temperature is None else temperature, presence_penalty=0.6, frequency_penalty=0.3)
         else:
+            # Token Factory vision endpoints sometimes queue a call for minutes; don't let the SDK's own
+            # 2 retries x 120 s hide that — fail fast and let the caller fall through to the next model.
             kwargs.update(temperature=0.1 if temperature is None else temperature)
-        r = await self.client.chat.completions.create(
-            model=self.vision_model,
-            messages=[{"role": "user", "content": content}],
-            max_tokens=max_tokens,
-            **kwargs,
-        )
+        client = self.client if self.kind == "edge" else self.client.with_options(timeout=40, max_retries=0)
+        r = None
+        for model in [self.vision_model, *self.vision_fallbacks]:
+            try:
+                r = await client.chat.completions.create(
+                    model=model, messages=[{"role": "user", "content": content}], max_tokens=max_tokens, **kwargs)
+                if model != self.vision_model:
+                    log.info("vision fallback used: %s", model)
+                break
+            except Exception as e:  # noqa: BLE001
+                if not self.vision_fallbacks or model == self.vision_fallbacks[-1]:
+                    raise
+                log.info("vision model %s failed (%s); trying next", model, type(e).__name__)
+        assert r is not None
         text = r.choices[0].message.content or ""
         try:
             return extract_json(text)

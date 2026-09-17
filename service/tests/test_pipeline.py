@@ -192,6 +192,13 @@ def test_pricing_only_fallback_and_ocr_echo_filter(monkeypatch):
     assert out.listing.condition_grade == "Very good"
 
 
+def test_comps_query_dedupes_words():
+    from app.schemas import Identification
+    q = pipeline._comps_query(Identification(name="Shepard Hardware Co. Cast Iron Cuff Iron",
+                                             maker="Shepard Hardware Co.", period="c. 1878-1880"))
+    assert q == "Shepard Hardware Cast Iron Cuff 1878-1880"
+
+
 def test_price_normalisation_swaps_and_clamps():
     p = pipeline._price({"low": "$900", "high": "600"}, "USD")
     assert (p.low, p.high) == (600.0, 900.0)
