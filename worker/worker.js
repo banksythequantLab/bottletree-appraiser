@@ -1,5 +1,6 @@
 // Bottle Tree app v0.3 — API worker: accounts, sales, photos (R2), AI appraisals (Nebius), storefront + Stripe.
 // Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
+import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent } from "./billing.js";
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const enc = new TextEncoder();
@@ -78,6 +79,10 @@ async function runAppraisal(env, appraisalId, item, photos) {
   } catch (e) {
     await db.prepare("UPDATE appraisals SET status='error', error=?, completed_at=? WHERE id=?")
       .bind(String(e && e.message || e).slice(0, 1000), now(), appraisalId).run();
+    // a failed run must not cost the dealer an estimate
+    const ap = await db.prepare("SELECT funded_by FROM appraisals WHERE id=?").bind(appraisalId).first();
+    const owner = await db.prepare("SELECT s.user_id FROM items i JOIN sales s ON s.id=i.sale_id WHERE i.id=?").bind(item.id).first();
+    if (ap?.funded_by && owner?.user_id) await refundEstimate(db, owner.user_id, ap.funded_by, "appraisal failed");
   }
 }
 
@@ -248,6 +253,16 @@ export default {
         return J({ error: "not found" }, 404);
       }
 
+      // ---------- BILLING: RevenueCat webhook (Authorization: Bearer <RC_WEBHOOK_SECRET>, set in the RC dashboard) ----------
+      if (parts[1] === "billing" && parts[2] === "revenuecat" && m === "POST") {
+        if (!env.RC_WEBHOOK_SECRET) return J({ error: "billing webhook not configured" }, 503);
+        const auth = request.headers.get("authorization") || "";
+        if (!timingEq(auth, `Bearer ${env.RC_WEBHOOK_SECRET}`)) return J({ error: "unauthorized" }, 401);
+        const body = await readJson(request);
+        if (!body.event) return J({ error: "no event" }, 400);
+        return J(await applyRevenueCatEvent(db, body.event));
+      }
+
       // ---------- DEVICE (Jetson kiosk) intake: X-Device-Key instead of a session ----------
       if (parts[1] === "device" && parts[2] === "intake" && m === "POST") {
         const key = request.headers.get("x-device-key") || "";
@@ -322,6 +337,9 @@ export default {
       if (!userId) return J({ error: "not authenticated" }, 401);
       const ownsSale = async (sid) => !!(await db.prepare("SELECT id FROM sales WHERE id=? AND user_id=?").bind(sid, userId).first());
       const ownsItem = async (iid) => await db.prepare("SELECT i.* FROM items i JOIN sales s ON s.id=i.sale_id WHERE i.id=? AND s.user_id=?").bind(iid, userId).first();
+
+      // ---------- plan / credits (the app shows this on the paywall and the appraisal button) ----------
+      if (parts[1] === "me" && parts[2] === "plan" && m === "GET") return J({ user_id: userId, ...(await planFor(db, userId)) });
 
       // ---------- device key (for the counter kiosk) ----------
       if (parts[1] === "me" && parts[2] === "device-key") {
@@ -467,10 +485,13 @@ export default {
               .bind(b.description ?? null, b.markings ?? null, iid).run();
             item.description = b.description ?? item.description; item.markings = b.markings ?? item.markings;
           }
+          // metered: unlimited plan -> pro plan (300/mo) -> credits -> 402 with the paywall hint
+          const fundedBy = await consumeEstimate(db, userId);
+          if (!fundedBy) return J({ error: "You're out of estimates", paywall: true, plan: await planFor(db, userId) }, 402);
           const apId = uid();
-          await db.prepare("INSERT INTO appraisals (id,item_id,status,created_at) VALUES (?,?,'pending',?)").bind(apId, iid, now()).run();
+          await db.prepare("INSERT INTO appraisals (id,item_id,status,created_at,funded_by) VALUES (?,?,'pending',?,?)").bind(apId, iid, now(), fundedBy).run();
           ctx.waitUntil(runAppraisal(env, apId, item, photos));
-          return J({ appraisal_id: apId, status: "pending" }, 202);
+          return J({ appraisal_id: apId, status: "pending", funded_by: fundedBy }, 202);
         }
         if (parts[3] === "publish" && m === "POST") {
           const b = await readJson(request);
