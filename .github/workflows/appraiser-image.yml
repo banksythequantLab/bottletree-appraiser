@@ -29,5 +29,5 @@ jobs:
           context: service
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/bottletree-appraiser:latest
-            ghcr.io/${{ github.repository_owner }}/bottletree-appraiser:${{ github.sha }}
+            ghcr.io/banksythequantlab/bottletree-appraiser:latest
+            ghcr.io/banksythequantlab/bottletree-appraiser:${{ github.sha }}
