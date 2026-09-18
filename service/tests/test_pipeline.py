@@ -100,6 +100,21 @@ def test_appraise_reprices_with_comps(monkeypatch):
     assert "two sold comps" in out.price_range.basis
 
 
+def test_edge_brain_skips_live_comps(monkeypatch):
+    nb = FakeNebius()
+    nb.kind = "edge"
+    called = []
+
+    async def comps(q, limit=5):
+        called.append(q)
+        return [{"title": "x", "price": 1, "url": "", "source": "", "note": ""}]
+
+    monkeypatch.setattr(pipeline, "search_comps", comps)
+    out = asyncio.run(pipeline.appraise(nb, _req(2), fake_resolve))
+    assert called == [] and out.comparables == []
+    assert any("comparables skipped" in w for w in out.warnings)
+
+
 def test_vision_failure_is_survivable(monkeypatch):
     nb = FakeNebius()
 

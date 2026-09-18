@@ -64,6 +64,8 @@ async function runAppraisal(env, appraisalId, item, photos) {
     };
     const headers = { "content-type": "application/json" };
     if (env.APPRAISER_SERVICE_KEY) headers["x-appraiser-key"] = env.APPRAISER_SERVICE_KEY;
+    // Nebius Serverless Endpoints front the container with their own bearer token (--auth token)
+    if (env.APPRAISER_TOKEN) headers["authorization"] = `Bearer ${env.APPRAISER_TOKEN}`;
     const r = await fetch(`${env.APPRAISER_URL}/appraise`, { method: "POST", headers, body: JSON.stringify(body) });
     const text = await r.text();
     if (!r.ok) throw new Error(`appraiser ${r.status}: ${text.slice(0, 300)}`);

@@ -270,9 +270,15 @@ async def appraise(nb: Nebius, req: AppraiseRequest, resolve_photo) -> Appraisal
     price.basis = _clean([price.basis])[0] if _clean([price.basis]) else price.basis
     comparables: list[Comparable] = []
 
-    query = _comps_query(ident)
-    hits = await search_comps(query)
-    if hits:
+    # Live comps only make sense with a network. On the edge brain we skip the search outright: a kiosk with
+    # the cable pulled would otherwise sit on a Tavily timeout, and the small re-pricer rarely improves on the
+    # first estimate anyway (measured: +65 s for the same $100-150 answer). The synced item gets cloud comps
+    # later in Bottle Tree.
+    on_edge = getattr(nb, "kind", "cloud") == "edge"
+    hits = [] if on_edge else await search_comps(_comps_query(ident))
+    if on_edge:
+        warnings.append("on-device: live comparables skipped; re-run Appraise in Bottle Tree once online for comps")
+    elif hits:
         reprice_user = (
             f"Item: {json.dumps(ident.model_dump())}\nCondition: {listing.condition_grade}\n"
             f"Current price_range: {json.dumps(price.model_dump())}\n\nComparables:\n{json.dumps(hits, indent=1)}"

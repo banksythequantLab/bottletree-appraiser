@@ -22,5 +22,5 @@
     "APPRAISER_URL": "http://127.0.0.1:8089",
     "PUBLIC_ORIGIN": "https://bottletree-app.dj-b02.workers.dev"
   }
-  // Secrets (wrangler secret put): APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+  // Secrets (wrangler secret put): APPRAISER_TOKEN (Nebius endpoint bearer), APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 }
