@@ -1,0 +1,21 @@
+{
+  "name": "bottletree-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bottle Tree — Android shell (Capacitor) around the PWA, with RevenueCat in-app purchases",
+  "scripts": {
+    "rc-sdk": "esbuild rc-entry.js --bundle --format=iife --minify --outfile=../worker/public/rc-sdk.js",
+    "sync": "cap sync android",
+    "open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8",
+    "@capacitor/core": "^8",
+    "@revenuecat/purchases-capacitor": "^13"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8",
+    "esbuild": "^0.25",
+    "typescript": "^7.0.2"
+  }
+}

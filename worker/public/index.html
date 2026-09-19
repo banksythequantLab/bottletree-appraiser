@@ -87,6 +87,11 @@ textarea:focus{outline:2px solid var(--cobalt);border-color:var(--cobalt)}
 .thumbs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
 .thumbs img{width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
 ul.ev{margin:4px 0 0;padding-left:18px;font-size:.88rem}ul.ev li{margin:3px 0}
+.paywall{position:fixed;inset:0;background:rgba(20,16,12,.55);display:flex;align-items:flex-end;justify-content:center;z-index:50}
+.pw-card{background:var(--panel,#fff);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:16px 16px 28px;box-shadow:0 -8px 30px rgba(0,0,0,.25);max-height:88vh;overflow:auto}
+.pw-opt{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;text-align:left;background:var(--panel2,#f4efe6);border:1px solid var(--line,#e2d9c8);border-radius:12px;padding:12px;margin-top:8px;font:inherit;cursor:pointer}
+.pw-opt:disabled{opacity:.5}
+.pw-opt .pr{font-weight:800;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -103,6 +108,8 @@ ul.ev{margin:4px 0 0;padding-left:18px;font-size:.88rem}ul.ev li{margin:3px 0}
   <button data-tab="summary"><span class="ic">📊</span>Summary</button>
 </nav>
 <div class="toast" id="toast"></div>
-<script src="/app.js?v=0.3"></script>
+<script src="/rc-sdk.js?v=0.4"></script>
+<script src="/billing.js?v=0.4"></script>
+<script src="/app.js?v=0.4"></script>
 </body>
 </html>

@@ -339,7 +339,8 @@ export default {
       const ownsItem = async (iid) => await db.prepare("SELECT i.* FROM items i JOIN sales s ON s.id=i.sale_id WHERE i.id=? AND s.user_id=?").bind(iid, userId).first();
 
       // ---------- plan / credits (the app shows this on the paywall and the appraisal button) ----------
-      if (parts[1] === "me" && parts[2] === "plan" && m === "GET") return J({ user_id: userId, ...(await planFor(db, userId)) });
+      if (parts[1] === "me" && parts[2] === "plan" && m === "GET")
+        return J({ user_id: userId, rc_android_key: env.RC_ANDROID_KEY || null, play_url: env.PLAY_URL || null, ...(await planFor(db, userId)) });
 
       // ---------- device key (for the counter kiosk) ----------
       if (parts[1] === "me" && parts[2] === "device-key") {

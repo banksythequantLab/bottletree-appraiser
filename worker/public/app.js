@@ -4,17 +4,30 @@ const app = $("#app"), tabs = $("#tabs"), ctx = $("#ctx"), backBtn = $("#backBtn
       cartbar = $("#cartbar");
 let state = { view: "sales", saleId: null, detail: null, tab: "items", cart: new Set() };
 let user = null;
+let billingInit = false;
+window.addEventListener("bt:plan", () => { if (state.view === "sales") renderSales(); });
 
 const money = c => "$" + (c / 100).toFixed(2);
 const esc = s => (s || "").replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
 async function api(path, opts) {
   const r = await fetch("/api" + path, { headers: { "content-type": "application/json" }, credentials: "same-origin", ...opts });
   if (r.status === 401 && !path.startsWith("/auth")) { user = null; renderAuth(); throw new Error("Please sign in"); }
-  if (!r.ok) { let e = {}; try { e = await r.json(); } catch {} throw new Error(e.error || ("HTTP " + r.status)); }
+  if (!r.ok) {
+    let e = {}; try { e = await r.json(); } catch {}
+    if (r.status === 402 && e.paywall && window.BTBilling) { BTBilling.refresh().then(() => BTBilling.open("You're out of estimates. Your items and photos are saved.")); }
+    throw new Error(e.error || ("HTTP " + r.status));
+  }
   return r.json();
 }
 let toastT;
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 1800); }
+window.toast = toast;
+// estimates pill (sales screen); refreshed after purchases
+function planPill() {
+  const p = window.BTBilling && BTBilling.plan;
+  if (!p) return "";
+  return `<a href="#" id="planPill" class="pill" style="text-decoration:none">${esc(BTBilling.summary())}${p.plan === "free" ? " · get more" : ""}</a>`;
+}
 
 function setChrome() {
   const inSale = state.view === "sale";
@@ -61,7 +74,7 @@ function renderAuth(mode) {
 }
 async function logout() {
   try { await api("/auth/logout", { method: "POST" }); } catch {}
-  user = null; renderAuth("login");
+  user = null; billingInit = false; renderAuth("login");
 }
 
 // ---------- Sales list ----------
@@ -70,7 +83,7 @@ async function renderSales() {
   app.innerHTML = `<div class="row" style="justify-content:space-between;align-items:baseline;margin-top:6px">
       <h1 class="h1" style="margin:0">Your sales</h1>
       <span><a href="#" id="myshop" class="muted" style="font-size:.85rem;font-weight:700;margin-right:12px">My shop</a><a href="#" id="signout" class="muted" style="font-size:.85rem;font-weight:700">Sign out</a></span></div>
-    <div class="muted" style="font-size:.82rem;margin:2px 0 4px">${esc(user || "")}</div>
+    <div class="row" style="justify-content:space-between;align-items:center;margin:2px 0 4px"><span class="muted" style="font-size:.82rem">${esc(user || "")}</span>${planPill()}</div>
     <div class="card">
       <label>Start a new sale</label>
       <div class="row"><input id="newName" placeholder="e.g. Saturday Garage Sale" enterkeyhint="go"></div>
@@ -82,6 +95,8 @@ async function renderSales() {
   $("#newName").addEventListener("keydown", e => { if (e.key === "Enter") createSale(); });
   $("#signout").onclick = e => { e.preventDefault(); logout(); };
   $("#myshop").onclick = e => { e.preventDefault(); renderShopSetup(renderSales); };
+  if ($("#planPill")) $("#planPill").onclick = e => { e.preventDefault(); BTBilling.open(); };
+  if (window.BTBilling && !billingInit) { billingInit = true; BTBilling.init().then(p => { if (p && state.view === "sales") renderSales(); }); }
   const list = await api("/sales");
   const el = $("#salesList");
   if (!list.length) { el.innerHTML = `<div class="empty"><div class="em">🏷️</div>No sales yet. Start one above.</div>`; return; }
