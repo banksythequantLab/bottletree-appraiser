@@ -20,7 +20,9 @@
   "vars": {
     // Public URL of the FastAPI appraiser on Nebius AI Cloud (no trailing slash)
     "APPRAISER_URL": "http://127.0.0.1:8089",
-    "PUBLIC_ORIGIN": "https://bottletree-app.dj-b02.workers.dev"
+    "PUBLIC_ORIGIN": "https://bottletree-app.dj-b02.workers.dev",
+    // RevenueCat public SDK key (test_ = RevenueCat Test Store until the Play app is linked, then goog_)
+    "RC_ANDROID_KEY": "test_JocUlLPMbvRTkSmTlqEGEAThDMr"
   }
   // Secrets (wrangler secret put): APPRAISER_TOKEN (Nebius endpoint bearer), APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 }
