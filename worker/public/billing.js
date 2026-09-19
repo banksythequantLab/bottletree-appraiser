@@ -49,8 +49,10 @@ window.BTBilling = (() => {
     if (native) {
       try {
         if (await ensurePurchases()) {
-          const { offerings } = await Purchases.getOfferings();
-          const cur = offerings && offerings.current;
+          // purchases-capacitor returns PurchasesOfferings directly ({all, current}); tolerate a wrapped shape too
+          const res = await Purchases.getOfferings();
+          const offerings = (res && res.offerings) || res;
+          const cur = offerings && (offerings.current || (offerings.all && offerings.all.default));
           (cur ? cur.availablePackages : []).forEach(p => { const k = String(p.product.identifier).split(":")[0]; pkgs[k] = p; });
           storeReady = Object.keys(pkgs).length > 0;
         }
