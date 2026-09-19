@@ -1,6 +1,21 @@
 apply plugin: 'com.android.application'
 
+// upload key lives outside git: android/keystore.properties (see ../keys/, both ignored)
+def ksProps = new Properties()
+def ksFile = rootProject.file("keystore.properties")
+if (ksFile.exists()) ksProps.load(new FileInputStream(ksFile))
+
 android {
+    signingConfigs {
+        release {
+            if (ksFile.exists()) {
+                storeFile rootProject.file(ksProps['storeFile'])
+                storePassword ksProps['storePassword']
+                keyAlias ksProps['keyAlias']
+                keyPassword ksProps['keyPassword']
+            }
+        }
+    }
     namespace = "ai.banksy.bottletree"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
@@ -20,6 +35,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (ksFile.exists()) signingConfig signingConfigs.release
         }
     }
 }
