@@ -23,13 +23,13 @@ Open (note **/u/1/** — /u/0/ is a different Google account stuck on a terms pa
 
     https://app.revenuecat.com/projects/d8d4752b/apps/app995e6da677
 
-## 2. Swap the SDK key (Claude can do this once step 1 is green)
+## 2. Swap the SDK key — DONE Sep 20 (commit 48b0b3e, worker redeployed, verified live)
 
 - `RC_ANDROID_KEY` in `worker/wrangler.jsonc`: `test_JocUlLPMbvRTkSmTlqEGEAThDMr`
   -> `goog_bruXXcAjAfxUxeHpcoCYElturCQ`
 - `npx wrangler deploy` — worker only, no new AAB, no new Play review
 
-## 3. Sandbox purchase test
+## 3. Sandbox purchase test — REMAINING (needs a signed-in device)
 
 - Add the tester Google account as a license tester in Play Console
 - Install from the internal testing link, buy the 10-pack, confirm credits land in D1
