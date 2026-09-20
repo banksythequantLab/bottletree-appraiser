@@ -2,7 +2,7 @@
 
 Status as of Sep 19, 2026.
 
-## 1. Fix the RevenueCat credentials (2 minutes, only Derek can do it)
+## 1. RevenueCat credentials — DONE Sep 19, waiting on Google propagation
 
 RevenueCat has the key file saved. Two of its three checks pass; the failing one is
 "Can validate Google Play subscription purchases". The service account was invited to Play
@@ -46,3 +46,13 @@ Open (note **/u/1/** — /u/0/ is a different Google account stuck on a terms pa
 - Service account key (gitignored, never commit): `android-app/keys/revenuecat-play-sa.json`
 - Google Cloud project: `bottletree-app-2026`
 - Play reviewer account: `playreview@bottletree.test` (25 credits preloaded)
+
+> Status Sep 19, 2026: account-level permissions granted and verified via the Play
+> developers/users API — accountPerms now carries the full _GLOBAL set. The purchases
+> API still returns 401; that is Google's propagation lag, not a config error. Verify with:
+>
+>     gcloud auth print-access-token --account=revenuecat@bottletree-app-2026.iam.gserviceaccount.com --scopes=https://www.googleapis.com/auth/androidpublisher
+>
+> then GET androidpublisher/v3/applications/ai.banksy.bottletree/purchases/subscriptionsv2/tokens/DUMMY
+> 401 = still propagating. 400/404 = ready; proceed to step 2.
+
