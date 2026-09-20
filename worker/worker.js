@@ -35,6 +35,35 @@ function getCookie(req, name) {
   const m = c.match(new RegExp("(?:^|; )" + name + "=([^;]+)"));
   return m ? decodeURIComponent(m[1]) : null;
 }
+// ---- Google ID token verification (RS256 against Google's JWKS) ----
+const b64urlToBytes = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=")), c => c.charCodeAt(0));
+let _jwks = { keys: [], at: 0 };
+async function googleKeys() {
+  if (Date.now() - _jwks.at < 3600e3 && _jwks.keys.length) return _jwks.keys;
+  const r = await fetch("https://www.googleapis.com/oauth2/v3/certs");
+  if (!r.ok) throw new Error("jwks fetch failed");
+  _jwks = { keys: (await r.json()).keys || [], at: Date.now() };
+  return _jwks.keys;
+}
+/** Returns { sub, email, email_verified, name } or throws. Verifies signature, issuer, audience and expiry. */
+async function verifyGoogleIdToken(idToken, clientId) {
+  const parts = String(idToken || "").split(".");
+  if (parts.length !== 3) throw new Error("malformed token");
+  const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[0])));
+  const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1])));
+  if (header.alg !== "RS256") throw new Error("unexpected alg");
+  const jwk = (await googleKeys()).find(k => k.kid === header.kid);
+  if (!jwk) throw new Error("unknown signing key");
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64urlToBytes(parts[2]), new TextEncoder().encode(parts[0] + "." + parts[1]));
+  if (!ok) throw new Error("bad signature");
+  if (!["accounts.google.com", "https://accounts.google.com"].includes(claims.iss)) throw new Error("bad issuer");
+  if (!clientId || claims.aud !== clientId) throw new Error("bad audience");
+  if (typeof claims.exp !== "number" || claims.exp * 1000 < Date.now()) throw new Error("token expired");
+  if (claims.email_verified !== true && claims.email_verified !== "true") throw new Error("email not verified");
+  if (!claims.email) throw new Error("no email in token");
+  return { sub: claims.sub, email: String(claims.email).trim().toLowerCase(), name: claims.name || "" };
+}
 function sessionCookie(token) { return `bt_session=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`; }
 const clearCookie = "bt_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
 
@@ -314,9 +343,30 @@ export default {
           const email = (b.email || "").trim().toLowerCase();
           const u = await db.prepare("SELECT * FROM users WHERE email=?").bind(email).first();
           if (!u) return J({ error: "Wrong email or password" }, 401);
+          // Google-only accounts carry an empty hash; never let that match a submitted password.
+          if (!u.pw_hash) return J({ error: "This account uses Sign in with Google" }, 401);
           const h = await pbkdf2(b.password || "", u.pw_salt);
           if (!timingEq(h, u.pw_hash)) return J({ error: "Wrong email or password" }, 401);
           return J({ email }, 200, { "Set-Cookie": sessionCookie(await newSession(db, u.id)) });
+        }
+        if (act === "google" && m === "POST") {
+          if (!env.GOOGLE_CLIENT_ID) return J({ error: "Google sign-in is not configured" }, 503);
+          const b = await readJson(request);
+          let g;
+          try { g = await verifyGoogleIdToken(b.credential, env.GOOGLE_CLIENT_ID); }
+          catch (e) { return J({ error: "Could not verify that Google sign-in" }, 401); }
+          // Match on sub first (email can change), then fall back to email to link an existing password account.
+          let u = await db.prepare("SELECT * FROM users WHERE google_sub=?").bind(g.sub).first();
+          if (!u) {
+            u = await db.prepare("SELECT * FROM users WHERE email=?").bind(g.email).first();
+            if (u) await db.prepare("UPDATE users SET google_sub=? WHERE id=?").bind(g.sub, u.id).run();
+          }
+          if (!u) {
+            const id = uid();
+            await db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,google_sub,created_at) VALUES (?,?,'','',?,?)").bind(id, g.email, g.sub, now()).run();
+            u = { id, email: g.email };
+          }
+          return J({ email: u.email }, 200, { "Set-Cookie": sessionCookie(await newSession(db, u.id)) });
         }
         if (act === "logout" && m === "POST") {
           const tok = getCookie(request, "bt_session");
