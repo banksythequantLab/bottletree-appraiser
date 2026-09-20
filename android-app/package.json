@@ -11,6 +11,7 @@
   "dependencies": {
     "@capacitor/android": "^8",
     "@capacitor/core": "^8",
+    "@capgo/capacitor-social-login": "^8.5.10",
     "@revenuecat/purchases-capacitor": "^13"
   },
   "devDependencies": {

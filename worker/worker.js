@@ -379,6 +379,9 @@ export default {
           const u = await db.prepare("SELECT email, shop_slug, shop_name, shop_blurb FROM users WHERE id=?").bind(uidv).first();
           return J(u || {});
         }
+        // Public: the web client ID is not a secret; the app needs it to render the Google button.
+        if (act === "config" && m === "GET")
+          return J({ google_client_id: env.GOOGLE_CLIENT_ID || null });
         return J({ error: "not found" }, 404);
       }
 

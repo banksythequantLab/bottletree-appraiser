@@ -14,6 +14,13 @@ const config: CapacitorConfig = {
     allowMixedContent: false,
     backgroundColor: '#f6f1e7',
   },
+  plugins: {
+    // Only Google is bundled; the others would drag in SDKs we don't use.
+    SocialLogin: {
+      providers: { google: true, facebook: false, apple: false, twitter: false },
+      logLevel: 1,
+    },
+  },
 };
 
 export default config;

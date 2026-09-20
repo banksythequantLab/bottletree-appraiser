@@ -38,6 +38,75 @@ function setChrome() {
   [...tabs.children].forEach(b => b.classList.toggle("on", b.dataset.tab === state.tab));
 }
 
+// ---------- Sign in with Google ----------
+// Two paths, one endpoint. On the web we use Google Identity Services. Inside the
+// Capacitor shell GIS is unusable (Google blocks OAuth in embedded WebViews with
+// disallowed_useragent), so the native build uses Credential Manager via the
+// social-login plugin and hands us the same ID token.
+const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+let authCfg = null, gisReady = null, gInit = false;
+
+async function getAuthCfg() {
+  if (authCfg) return authCfg;
+  try { authCfg = await api("/auth/config"); } catch { authCfg = { google_client_id: null }; }
+  return authCfg;
+}
+function loadGis() {
+  if (gisReady) return gisReady;
+  gisReady = new Promise((res, rej) => {
+    if (window.google && google.accounts && google.accounts.id) return res();
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true; s.onload = () => res(); s.onerror = () => rej(new Error("gsi load failed"));
+    document.head.appendChild(s);
+  });
+  return gisReady;
+}
+async function signInWithGoogleToken(credential) {
+  try {
+    const r = await api("/auth/google", { method: "POST", body: JSON.stringify({ credential }) });
+    user = r.email; billingInit = false; toast("Signed in"); renderSales();
+  } catch (e) { toast(e.message); }
+}
+async function nativeGoogleSignIn(btn) {
+  const cfg = await getAuthCfg();
+  const SL = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.SocialLogin;
+  if (!SL) return toast("Google sign-in isn't available in this build");
+  btn.disabled = true;
+  try {
+    if (!gInit) { await SL.initialize({ google: { webClientId: cfg.google_client_id } }); gInit = true; }
+    const res = await SL.login({ provider: "google", options: { scopes: ["email", "profile"] } });
+    const idToken = res && res.result && res.result.idToken;
+    if (!idToken) throw new Error("Google didn't return a token");
+    await signInWithGoogleToken(idToken);
+  } catch (e) {
+    toast((e && e.message) ? e.message : "Google sign-in was cancelled");
+  } finally { btn.disabled = false; }
+}
+async function mountGoogle() {
+  const wrap = $("#gWrap"); if (!wrap) return;
+  const cfg = await getAuthCfg();
+  if (!cfg.google_client_id) { wrap.remove(); return; }   // not configured yet — stay password-only
+  wrap.style.display = "";
+  if (isNative) {
+    wrap.querySelector("#gBtn").innerHTML =
+      `<button class="btn" id="gNative" style="background:#fff;color:#222;border:1px solid #dadce0">Continue with Google</button>`;
+    $("#gNative").onclick = () => nativeGoogleSignIn($("#gNative"));
+    return;
+  }
+  try {
+    await loadGis();
+    google.accounts.id.initialize({
+      client_id: cfg.google_client_id,
+      callback: r => signInWithGoogleToken(r.credential),
+      ux_mode: "popup"
+    });
+    google.accounts.id.renderButton($("#gBtn"), {
+      theme: "outline", size: "large", text: "continue_with", shape: "rectangular", width: 300
+    });
+  } catch { wrap.remove(); }
+}
+
 // ---------- Auth ----------
 function renderAuth(mode) {
   mode = mode || "login";
@@ -57,6 +126,10 @@ function renderAuth(mode) {
       <input id="auPw" type="password" autocomplete="${isLogin ? "current-password" : "new-password"}" placeholder="${isLogin ? "Your password" : "At least 8 characters"}" enterkeyhint="go">
       <div style="height:14px"></div>
       <button class="btn" id="auGo">${isLogin ? "Sign in" : "Create account"}</button>
+      <div id="gWrap" style="display:none">
+        <div class="muted" style="text-align:center;margin:14px 0 10px">or</div>
+        <div id="gBtn" style="display:flex;justify-content:center"></div>
+      </div>
     </div>
     <div class="muted" style="text-align:center">${isLogin ? "New here?" : "Already have an account?"}
       <a href="#" id="auToggle" style="color:var(--cobalt);font-weight:800">${isLogin ? "Create an account" : "Sign in"}</a></div>`;
@@ -71,9 +144,11 @@ function renderAuth(mode) {
   $("#auGo").onclick = go;
   $("#auPw").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
   $("#auToggle").onclick = e => { e.preventDefault(); renderAuth(isLogin ? "register" : "login"); };
+  mountGoogle();
 }
 async function logout() {
   try { await api("/auth/logout", { method: "POST" }); } catch {}
+  try { if (window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect(); } catch {}
   user = null; billingInit = false; renderAuth("login");
 }
 
