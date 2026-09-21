@@ -647,15 +647,33 @@ async function addByTag(raw) {
   toast(`#${String(it.tag_no).padStart(3, "0")} ${it.ai_title || it.name} — ${money(it.price_cents)}`);
 }
 
+// Safari has no BarcodeDetector, so we ship ZXing — but it is ~474KB, and a phone that already has
+// a native decoder should never download it. Fetched on first use only, then cached by the browser.
+let zxingLoad = null;
+function loadZxing() {
+  if (window.BTScan) return Promise.resolve(true);
+  if (!zxingLoad) zxingLoad = new Promise(res => {
+    const s = document.createElement("script");
+    s.src = "/scan.js"; s.async = true;
+    s.onload = () => res(!!window.BTScan);
+    s.onerror = () => { zxingLoad = null; res(false); };
+    document.head.appendChild(s);
+  });
+  return zxingLoad;
+}
+
 async function scanTag() {
   if (!canUseCamera()) return toast("No camera here — type the number under the code");
-  if (!("BarcodeDetector" in window))
-    return toast("This browser can't scan (Safari doesn't support it) — type the number instead");
-  let det;
-  try { det = new BarcodeDetector({ formats: ["qr_code", "code_128"] }); }
-  catch { return toast("Scanning isn't available here — type the number instead"); }
+  let det = null;
+  if ("BarcodeDetector" in window) {
+    try { det = new BarcodeDetector({ formats: ["qr_code", "code_128"] }); } catch { det = null; }
+  }
+  if (!det) {
+    toast("Starting the scanner…");
+    if (!(await loadZxing())) return toast("Couldn't load the scanner — type the number instead");
+  }
 
-  let stream = null, stop = false;
+  let stream = null, stop = false, zx = null;
   const ov = document.createElement("div");
   ov.style.cssText = "position:fixed;inset:0;z-index:9999;background:#000;display:flex;flex-direction:column";
   ov.innerHTML = `
@@ -670,7 +688,12 @@ async function scanTag() {
     <div id="scLog" style="flex:0 0 auto;color:#fff;text-align:center;padding:12px 14px 24px;font-size:.9rem;min-height:2.6em">Scanning…</div>`;
   document.body.appendChild(ov);
   const v = ov.querySelector("#scV"), log = ov.querySelector("#scLog");
-  const close = () => { stop = true; try { stream && stream.getTracks().forEach(t => t.stop()); } catch {} ov.remove(); renderCashier(); };
+  const close = () => {
+    stop = true;
+    try { zx && zx.stop(); } catch {}
+    try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
+    ov.remove(); renderCashier();
+  };
   ov.querySelector("#scX").onclick = close;
 
   try {
@@ -678,30 +701,39 @@ async function scanTag() {
     v.srcObject = stream; await v.play().catch(() => {});
   } catch { log.textContent = "Couldn't open the camera."; return; }
 
-  // Keep scanning so a cashier can sweep a whole armful without reopening the camera each time.
+  // One code per tag per 2.5s, whichever engine saw it — otherwise a tag held in frame fires every frame.
   const seen = new Map();
-  while (!stop) {
+  let busy = false;
+  const onHit = async val => {
+    val = (val || "").trim();
+    if (!val || busy) return;
+    if (Date.now() - (seen.get(val) || 0) < 2500) return;
+    seen.set(val, Date.now());
+    busy = true;
     try {
-      const hits = await det.detect(v);
-      for (const h of hits) {
-        const val = (h.rawValue || "").trim();
-        if (!val) continue;
-        if (Date.now() - (seen.get(val) || 0) < 2500) continue;   // one beep per tag, not per frame
-        seen.set(val, Date.now());
-        try {
-          const it = await api("/sales/" + state.saleId + "/tag/" + encodeURIComponent(val));
-          if (it.status !== "available") { log.textContent = `#${it.tag_no} ${it.name} — already sold`; }
-          else if (state.cart.has(it.id)) { log.textContent = `#${it.tag_no} already added`; }
-          else {
-            state.cart.add(it.id);
-            log.textContent = `✓ #${String(it.tag_no).padStart(3, "0")} ${it.ai_title || it.name} — ${money(it.price_cents)}`;
-            updateCart();
-            if (navigator.vibrate) navigator.vibrate(60);
-          }
-        } catch (e) { log.textContent = e.message; }
+      const it = await api("/sales/" + state.saleId + "/tag/" + encodeURIComponent(val));
+      if (it.status !== "available") log.textContent = `#${it.tag_no} ${it.name} — already sold`;
+      else if (state.cart.has(it.id)) log.textContent = `#${it.tag_no} already added`;
+      else {
+        state.cart.add(it.id);
+        log.textContent = `✓ #${String(it.tag_no).padStart(3, "0")} ${it.ai_title || it.name} — ${money(it.price_cents)}`;
+        updateCart();
+        if (navigator.vibrate) navigator.vibrate(60);
       }
-    } catch {}
-    await new Promise(r => setTimeout(r, 220));
+    } catch (e) { log.textContent = e.message; }
+    finally { busy = false; }
+  };
+
+  if (det) {
+    // Native path: poll the detector. Cheap, and it keeps the camera open between reads.
+    while (!stop) {
+      try { for (const h of await det.detect(v)) await onHit(h.rawValue); } catch {}
+      await new Promise(r => setTimeout(r, 220));
+    }
+  } else {
+    // ZXing drives its own frame loop and calls us on every decode.
+    try { zx = await window.BTScan.start(v, onHit); }
+    catch { log.textContent = "Scanner wouldn't start — type the number instead"; }
   }
 }
 
@@ -715,7 +747,7 @@ function renderCashier() {
         <button class="btn" id="scanGo" style="flex:1 1 60%">📷 Scan a tag</button>
         <input id="tagNo" inputmode="numeric" placeholder="or type #" style="flex:1 1 30%;text-align:center">
       </div>
-      <div class="muted" style="font-size:.8rem;margin-top:6px">Scan the QR or barcode on the price tag. No camera? Type the number under it.</div>
+      <div class="muted" style="font-size:.8rem;margin-top:6px">Scan the QR or barcode on the price tag. No camera? Type the number under it.${!("BarcodeDetector" in window) ? " First scan on this phone downloads the reader — do it once on wifi." : ""}</div>
     </div>
     <div class="row" style="justify-content:space-between;margin:8px 2px"><h3>Tap items to sell</h3><span class="muted" style="font-size:.85rem">${avail.length} available</span></div>
     <div id="cashList" class="list"></div>`;
