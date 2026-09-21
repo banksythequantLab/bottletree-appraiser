@@ -602,6 +602,9 @@ async function addItem() {
   const name = $("#iName").value.trim(), price = $("#iPrice").value.trim(), seller_id = $("#iSeller").value;
   if (!name) return toast("Item name?");
   if (price === "" || isNaN(Number(price))) return toast("Enter a price");
+  if (Number(price) < 0) return toast("That's not a price");
+  // $0 is allowed — free stuff is real at a sale — but it should be deliberate, not a typo.
+  if (Number(price) === 0 && !confirm(`Add "${name}" with no price?\n\nIt'll show as "needs a price" at the cashier until you set one.`)) return;
   const btn = $("#addItem"), photos = pendingPhotos.slice();
   btn.disabled = true; if (photos.length) btn.textContent = "Uploading…";
   let id;
@@ -756,17 +759,38 @@ function renderCashier() {
   const el = $("#cashList");
   if (!avail.length) { el.innerHTML = `<div class="empty"><div class="em">💵</div>Nothing available to sell. Add items first.</div>`; }
   else el.innerHTML = avail.map(i => `<div class="li tap ${state.cart.has(i.id) ? "selected" : ""}" data-id="${i.id}">
-      <div class="nm">${state.cart.has(i.id) ? "✓ " : ""}${esc(i.name)}</div><span class="pr">${money(i.price_cents)}</span></div>`).join("");
-  el.querySelectorAll(".li").forEach(li => li.onclick = () => { const id = li.dataset.id; state.cart.has(id) ? state.cart.delete(id) : state.cart.add(id); renderCashier(); });
+      <div class="nm">${state.cart.has(i.id) ? "✓ " : ""}${i.tag_no ? `<span class="muted" style="font-weight:800">#${String(i.tag_no).padStart(3, "0")}</span> ` : ""}${esc(i.ai_title || i.name)}</div>
+      <span class="pr" ${i.price_cents <= 0 ? 'style="color:var(--rust,#a33);font-size:.82rem"' : ""}>${i.price_cents > 0 ? money(i.price_cents) : "needs a price"}</span></div>`).join("");
+  el.querySelectorAll(".li").forEach(li => li.onclick = async () => {
+    const id = li.dataset.id, it = avail.find(x => x.id === id);
+    // An unpriced item can't just go in the cart — ask now, while the buyer is standing there.
+    if (it && it.price_cents <= 0 && !state.cart.has(id)) {
+      const p = prompt(`Price for ${it.ai_title || it.name}?\n\nLeave blank to give it away.`, "");
+      if (p === null) return;
+      const price = p.trim() === "" ? 0 : Number(p);
+      if (!Number.isFinite(price) || price < 0) return toast("That's not a price");
+      try { await api("/items/" + id + "/price", { method: "PUT", body: JSON.stringify({ price }) }); }
+      catch (e) { return toast(e.message); }
+      await loadDetail();
+    }
+    state.cart.has(id) ? state.cart.delete(id) : state.cart.add(id);
+    renderCashier();
+  });
   updateCart();
 }
 function updateCart() { $("#cartTot").textContent = money(cartTotal()); $("#cartCnt").textContent = state.cart.size + " item" + (state.cart.size === 1 ? "" : "s"); setChrome(); }
 async function charge() {
   if (!state.cart.size) return;
   const ids = [...state.cart];
-  try { const r = await api("/sales/" + state.saleId + "/checkout", { method: "POST", body: JSON.stringify({ item_ids: ids }) });
-    toast("Sold — " + money(r.total_cents) + " (cash)"); state.cart = new Set(); await loadDetail(); renderCashier(); }
-  catch (e) { toast(e.message); }
+  const done = r => { toast("Sold — " + money(r.total_cents) + " (cash)"); state.cart = new Set(); loadDetail().then(renderCashier); };
+  try { return done(await api("/sales/" + state.saleId + "/checkout", { method: "POST", body: JSON.stringify({ item_ids: ids }) })); }
+  catch (e) {
+    // The server refuses a free sale unless we say we mean it. Ask, rather than silently ringing up $0.
+    if (!/no price/i.test(e.message)) return toast(e.message);
+    if (!confirm(`${e.message}.\n\nGive it away for free?`)) return;
+    try { return done(await api("/sales/" + state.saleId + "/checkout", { method: "POST", body: JSON.stringify({ item_ids: ids, allow_free: true }) })); }
+    catch (e2) { toast(e2.message); }
+  }
 }
 
 // Summary tab

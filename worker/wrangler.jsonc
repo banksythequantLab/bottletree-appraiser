@@ -1,5 +1,7 @@
 {
-  "name": "bottletree-app",
+  // Separate worker from bottletree-app so the Play-reviewed Bottle Tree build keeps its own URL.
+  // Same D1 and R2 on purpose: one account, one set of items, either front end.
+  "name": "roadshow-app",
   "main": "worker.js",
   "compatibility_date": "2026-09-01",
   "assets": {
@@ -17,16 +19,11 @@
   "r2_buckets": [
     { "binding": "PHOTOS", "bucket_name": "bottletree-photos" }
   ],
+  // Producer only. A Cloudflare queue takes one consumer, and bottletree-app already holds it —
+  // it runs against the same D1, so an appraisal started here is finished over there and the row
+  // updates either way. If bottletree-app is ever torn down, move the consumer block here.
   "queues": {
-    "producers": [{ "binding": "APPRAISALS", "queue": "bottletree-appraisals" }],
-    // One appraisal per invocation: they take ~2 min each and batching them would stack that up.
-    "consumers": [{
-      "queue": "bottletree-appraisals",
-      "max_batch_size": 1,
-      "max_concurrency": 6,
-      "max_retries": 2,
-      "dead_letter_queue": "bottletree-appraisals-dlq"
-    }]
+    "producers": [{ "binding": "APPRAISALS", "queue": "bottletree-appraisals" }]
   },
   "vars": {
     // No APPRAISER_URL: the appraisal runs inside the Worker (appraiser.js -> Token Factory + Tavily).

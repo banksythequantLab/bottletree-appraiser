@@ -562,8 +562,19 @@ export default {
           const ids = Array.isArray(b.item_ids) ? b.item_ids.filter(Boolean) : [];
           if (!ids.length) return J({ error: "no items" }, 400);
           const ph = ids.map(() => "?").join(",");
-          const rows = (await db.prepare(`SELECT id,price_cents FROM items WHERE sale_id=? AND status='available' AND id IN (${ph})`).bind(sid, ...ids).all()).results;
+          const rows = (await db.prepare(`SELECT id,name,tag_no,price_cents FROM items WHERE sale_id=? AND status='available' AND id IN (${ph})`).bind(sid, ...ids).all()).results;
           if (!rows.length) return J({ error: "items unavailable" }, 400);
+          // An item created before it was priced would otherwise ring up free and be marked sold.
+          // Giving something away is a real thing at a sale, so it is allowed — but only on purpose.
+          const unpriced = rows.filter(r => r.price_cents <= 0);
+          if (unpriced.length && b.allow_free !== true)
+            return J({
+              error: unpriced.length === 1
+                ? `${unpriced[0].tag_no ? "#" + unpriced[0].tag_no + " " : ""}${unpriced[0].name} has no price`
+                : `${unpriced.length} items have no price`,
+              unpriced: unpriced.map(r => ({ id: r.id, name: r.name, tag_no: r.tag_no })),
+              needs_price: true,
+            }, 409);
           const total = rows.reduce((a, r) => a + r.price_cents, 0);
           const txnId = uid();
           await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)").bind(txnId, sid, total, rows.length, (b.tender || "cash"), now()).run();
@@ -639,6 +650,14 @@ export default {
           if (env.APPRAISALS) await env.APPRAISALS.send({ appraisalId: apId, itemId: iid });
           else ctx.waitUntil(runAppraisal(env, apId, item, photos));   // local dev without the queue binding
           return J({ appraisal_id: apId, status: "pending", funded_by: fundedBy }, 202);
+        }
+        // Set a price without going through the listing flow — someone is holding the thing.
+        if (parts[3] === "price" && m === "PUT") {
+          const b = await readJson(request);
+          const cents = Math.round(Number(b.price) * 100);
+          if (!Number.isFinite(cents) || cents < 0) return J({ error: "bad price" }, 400);
+          await db.prepare("UPDATE items SET price_cents=? WHERE id=?").bind(cents, iid).run();
+          return J({ id: iid, price_cents: cents });
         }
         if (parts[3] === "publish" && m === "POST") {
           const b = await readJson(request);
