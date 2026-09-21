@@ -44,6 +44,7 @@ window.BTBilling = (() => {
   async function open(reason) {
     if (!plan) await refresh();
     const products = (plan && plan.products) || {};
+    const webLink = !native && plan && plan.rc_web_link ? String(plan.rc_web_link).replace(/\/+$/, "") : null;
     let pkgs = {};
     let storeReady = false;
     if (native) {
@@ -71,13 +72,16 @@ window.BTBilling = (() => {
           const p = products[k]; if (!p) return "";
           const price = pkgs[k] ? pkgs[k].product.priceString : ("$" + p.usd.toFixed(2));
           const per = p.kind === "plan" ? "/month" : "";
-          return `<button class="pw-opt" data-k="${k}" ${native && !storeReady ? "disabled" : ""}>
+          return `<button class="pw-opt" data-k="${k}" ${(native && !storeReady) || (!native && !webLink) ? "disabled" : ""}>
               <div><div class="nm">${esc(p.label)}</div><div class="muted" style="font-size:.8rem">${esc(BLURB[k] || "")}</div></div>
               <div class="pr">${esc(price)}<span class="muted" style="font-size:.75rem">${per}</span></div>
             </button>`;
         }).join("")}
         ${native ? `<div style="height:6px"></div><button class="btn sec sm" id="pwRestore">Restore purchases</button>
                     ${!storeReady ? `<div class="muted" style="font-size:.78rem;margin-top:6px">Store not reachable right now. Try again in a moment.</div>` : ""}`
+                 : webLink
+                 ? `<div class="muted" style="font-size:.8rem;margin-top:8px">Checkout opens in a new tab. Your estimates land on this same account${plan && plan.play_url ? `, and on <a href="${esc(plan.play_url)}" target="_blank" rel="noopener" style="color:var(--cobalt)">the Android app</a>` : ""}.</div>
+                    <div id="pwWait" class="muted" style="font-size:.8rem;margin-top:8px;display:none">Waiting for the purchase to land… <a href="#" id="pwCheck" style="color:var(--cobalt)">check now</a></div>`
                  : `<div class="muted" style="font-size:.8rem;margin-top:8px">Buy estimates in the Bottle Tree Android app${plan && plan.play_url ? ` — <a href="${esc(plan.play_url)}" target="_blank" rel="noopener" style="color:var(--cobalt)">get it on Google Play</a>` : " (Google Play, coming this week)"}. Your inventory is the same account everywhere.</div>`}
         <div class="muted" style="font-size:.7rem;margin-top:10px">Estimates are AI guesses for pricing help, not formal appraisals. Subscriptions renew monthly; cancel any time in Google Play.</div>
       </div>`;
@@ -85,9 +89,45 @@ window.BTBilling = (() => {
     const close = () => sheet.remove();
     sheet.querySelector("#pwClose").onclick = close;
     sheet.addEventListener("click", e => { if (e.target === sheet) close(); });
+    // Poll /api/me/plan until the RevenueCat webhook lands the grant. Web checkout happens in another
+    // tab, so there is nothing to await — we watch our own ledger instead.
+    const waitForGrant = async (tries = 10, gapMs = 3000) => {
+      const before = plan ? [plan.credits, plan.plan] : [null, null];
+      for (let i = 0; i < tries; i++) {
+        await new Promise(r => setTimeout(r, gapMs));
+        await refresh();
+        if (plan && (plan.credits !== before[0] || plan.plan !== before[1])) {
+          window.dispatchEvent(new CustomEvent("bt:plan", { detail: plan }));
+          if (window.toast) window.toast("Thanks — " + summary());
+          close();
+          return true;
+        }
+      }
+      return false;
+    };
+
     sheet.querySelectorAll(".pw-opt").forEach(b => b.onclick = async () => {
       const k = b.dataset.k;
-      if (!native) return;
+      if (!native) {
+        if (!webLink) return;
+        // RevenueCat Web Purchase Link: /<link>/<app_user_id>. The webhook credits that same id.
+        let u = `${webLink}/${encodeURIComponent(plan.user_id)}`;
+        if (plan.email) u += `?email=${encodeURIComponent(plan.email)}`;
+        window.open(u, "_blank", "noopener");
+        const w = sheet.querySelector("#pwWait");
+        if (w) {
+          w.style.display = "";
+          const check = w.querySelector("#pwCheck");
+          if (check) check.onclick = async e => {
+            e.preventDefault();
+            await refresh();
+            window.dispatchEvent(new CustomEvent("bt:plan", { detail: plan }));
+            if (window.toast) window.toast(summary());
+          };
+        }
+        waitForGrant();
+        return;
+      }
       b.disabled = true; b.querySelector(".pr").textContent = "…";
       try {
         await Purchases.purchasePackage({ aPackage: pkgs[k] });

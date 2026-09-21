@@ -402,8 +402,18 @@ export default {
       const ownsItem = async (iid) => await db.prepare("SELECT i.* FROM items i JOIN sales s ON s.id=i.sale_id WHERE i.id=? AND s.user_id=?").bind(iid, userId).first();
 
       // ---------- plan / credits (the app shows this on the paywall and the appraisal button) ----------
-      if (parts[1] === "me" && parts[2] === "plan" && m === "GET")
-        return J({ user_id: userId, rc_android_key: env.RC_ANDROID_KEY || null, play_url: env.PLAY_URL || null, ...(await planFor(db, userId)) });
+      if (parts[1] === "me" && parts[2] === "plan" && m === "GET") {
+        // rc_web_link is a RevenueCat Web Purchase Link. The web paywall appends /<user_id>, and the
+        // RevenueCat webhook credits that same id — the identical path a Play purchase takes.
+        const me = await db.prepare("SELECT email FROM users WHERE id=?").bind(userId).first();
+        return J({
+          user_id: userId, email: me?.email || null,
+          rc_android_key: env.RC_ANDROID_KEY || null,
+          rc_web_link: env.RC_WEB_LINK || null,
+          play_url: env.PLAY_URL || null,
+          ...(await planFor(db, userId)),
+        });
+      }
 
       // ---------- device key (for the counter kiosk) ----------
       if (parts[1] === "me" && parts[2] === "device-key") {
