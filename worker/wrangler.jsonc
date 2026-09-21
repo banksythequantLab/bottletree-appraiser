@@ -40,7 +40,10 @@
     // Google OAuth *web* client ID (project bottletree-app-2026). Public by design — it ships in the
     // page and is the `aud` we require on every ID token. The client *secret* is not used: we verify
     // ID tokens against Google's JWKS, we never do a server-side code exchange.
-    "GOOGLE_CLIENT_ID": "751660268260-k999i5tdfr36um4c7uatbu11is4djh9g.apps.googleusercontent.com"
+    "GOOGLE_CLIENT_ID": "751660268260-k999i5tdfr36um4c7uatbu11is4djh9g.apps.googleusercontent.com",
+    // RevenueCat Web Purchase Link. The paywall appends /<user_id>; the RevenueCat webhook credits
+    // that same id, so a web purchase and a Play purchase land in one ledger.
+    "RC_WEB_LINK": "https://pay.rev.cat/ukvqowwbpdfmdjjz"
   }
   // Secrets (wrangler secret put): APPRAISER_TOKEN (Nebius endpoint bearer), APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 }
