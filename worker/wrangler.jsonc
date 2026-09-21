@@ -22,7 +22,11 @@
     "APPRAISER_URL": "http://127.0.0.1:8089",
     "PUBLIC_ORIGIN": "https://bottletree-app.dj-b02.workers.dev",
     // RevenueCat public SDK key for the Play Store app (Play service credentials validated 2026-09-20)
-    "RC_ANDROID_KEY": "goog_bruXXcAjAfxUxeHpcoCYElturCQ"
+    "RC_ANDROID_KEY": "goog_bruXXcAjAfxUxeHpcoCYElturCQ",
+    // Google OAuth *web* client ID (project bottletree-app-2026). Public by design — it ships in the
+    // page and is the `aud` we require on every ID token. The client *secret* is not used: we verify
+    // ID tokens against Google's JWKS, we never do a server-side code exchange.
+    "GOOGLE_CLIENT_ID": "751660268260-k999i5tdfr36um4c7uatbu11is4djh9g.apps.googleusercontent.com"
   }
   // Secrets (wrangler secret put): APPRAISER_TOKEN (Nebius endpoint bearer), APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 }
