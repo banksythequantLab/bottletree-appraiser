@@ -35,7 +35,11 @@ function setChrome() {
   tabs.classList.toggle("hidden", !inSale);
   backBtn.classList.toggle("hidden", !inSale);
   ctx.textContent = inSale && state.detail ? state.detail.sale.name : "";
-  cartbar.classList.toggle("hidden", !(inSale && state.tab === "cashier" && state.cart.size));
+  const showCart = inSale && state.tab === "cashier" && state.cart.size;
+  cartbar.classList.toggle("hidden", !showCart);
+  // Reserve the height of whichever fixed bars are up, so the bottom of the list stays reachable.
+  document.body.classList.toggle("has-tabs", inSale && !showCart);
+  document.body.classList.toggle("has-cart", !!showCart);
   [...tabs.children].forEach(b => b.classList.toggle("on", b.dataset.tab === state.tab));
 }
 
@@ -293,10 +297,13 @@ function renderItems() {
       <div style="height:6px"></div>
       <button class="btn sec sm" id="addSeller">+ Add a seller</button>
     </div>
+    <div class="card">
+      <label>Price tags</label>
+      <div class="muted" style="font-size:.85rem;margin-bottom:8px">Print a tag for every item — number, name and price, with a code your phone can scan at the cashier.</div>
+      <button class="btn sec" id="printLabels"${avail.length ? "" : " disabled"}>🏷️ Print price labels${avail.length ? ` (${avail.length})` : ""}</button>
+    </div>
     <div class="row" style="justify-content:space-between;align-items:center;margin:6px 2px">
       <h3 style="margin:0">Items (${avail.length} available)</h3>
-      <a href="/labels?sale=${encodeURIComponent(state.saleId)}" target="_blank" rel="noopener"
-         class="muted" style="font-size:.85rem;font-weight:800;color:var(--cobalt)">🏷️ Print labels</a>
     </div>
     <div id="itemList" class="list"></div>`;
   // Photos on a manual add: a plain item is still an item you want a picture of, and the
@@ -318,6 +325,7 @@ function renderItems() {
     ic.onclick = async () => { const f = await openCamera("Photo of the item"); if (f) { pendingPhotos.push(f); drawThumbs(); } };
   }
   $("#addItem").onclick = addItem;
+  $("#printLabels").onclick = () => window.open("/labels?sale=" + encodeURIComponent(state.saleId), "_blank", "noopener");
   $("#aiAdd").onclick = () => renderCapture();
   $("#iPrice").addEventListener("keydown", e => { if (e.key === "Enter") addItem(); });
   $("#addSeller").onclick = addSeller;

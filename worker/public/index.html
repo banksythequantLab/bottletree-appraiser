@@ -21,7 +21,11 @@
 }}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased;padding-bottom:76px}
+body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased;padding-bottom:calc(28px + env(safe-area-inset-bottom))}
+/* The tab bar and the cashier bar are fixed, so the page has to reserve their height or the last
+   rows sit underneath them and cannot be reached. The cashier bar stacks above the tab bar. */
+body.has-tabs{padding-bottom:calc(92px + env(safe-area-inset-bottom))}
+body.has-cart{padding-bottom:calc(158px + env(safe-area-inset-bottom))}
 h1,h2,h3{font-family:"Fraunces",Georgia,serif;font-weight:600;margin:0}
 button{font-family:inherit;cursor:pointer}
 .wrap{max-width:620px;margin:0 auto;padding:0 14px}
