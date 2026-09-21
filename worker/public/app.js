@@ -243,6 +243,74 @@ function renderItems() {
   el.querySelectorAll("[data-open]").forEach(li => li.onclick = () => renderItemDetail(li.dataset.open));
 }
 
+// ---------- In-page camera ----------
+// `capture="environment"` only opens a camera on phones; on a laptop or a shop counter
+// machine it just opens a file picker. This gives every platform a real viewfinder.
+const canUseCamera = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.isSecureContext);
+
+function openCamera(title) {
+  return new Promise(resolve => {
+    let stream = null, facing = "environment", settled = false;
+    const ov = document.createElement("div");
+    ov.style.cssText = "position:fixed;inset:0;z-index:9999;background:#000;display:flex;flex-direction:column";
+    const btn = "background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:10px;padding:8px 14px;font:inherit;font-weight:700;cursor:pointer";
+    ov.innerHTML = `
+      <div style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;color:#fff">
+        <button id="camX" style="${btn}">Cancel</button>
+        <span style="font-weight:800;font-size:.95rem;text-align:center">${esc(title || "Take a photo")}</span>
+        <button id="camFlip" style="${btn}">Flip</button>
+      </div>
+      <div style="flex:1 1 auto;position:relative;min-height:0">
+        <video id="camV" playsinline autoplay muted style="width:100%;height:100%;object-fit:contain;background:#000"></video>
+        <div id="camErr" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;text-align:center;color:#fff;padding:28px;font-size:.95rem;line-height:1.45"></div>
+      </div>
+      <div style="flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:18px;padding:18px 14px 26px">
+        <button id="camShot" aria-label="Take photo" style="width:74px;height:74px;border-radius:50%;background:#fff;border:5px solid rgba(255,255,255,.45);cursor:pointer"></button>
+      </div>`;
+    document.body.appendChild(ov);
+    const v = ov.querySelector("#camV"), err = ov.querySelector("#camErr");
+
+    const stop = () => { try { if (stream) stream.getTracks().forEach(t => t.stop()); } catch {} stream = null; };
+    const done = f => { if (settled) return; settled = true; stop(); document.removeEventListener("keydown", onKey); ov.remove(); resolve(f); };
+    const onKey = e => { if (e.key === "Escape") done(null); };
+    document.addEventListener("keydown", onKey);
+
+    const fail = msg => { err.textContent = msg; err.style.display = "flex"; ov.querySelector("#camShot").style.opacity = ".35"; };
+
+    async function start() {
+      stop(); err.style.display = "none"; ov.querySelector("#camShot").style.opacity = "1";
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1920 } },
+          audio: false
+        });
+        v.srcObject = stream;
+        await v.play().catch(() => {});
+      } catch (e) {
+        const n = e && e.name;
+        if (n === "NotAllowedError" || n === "SecurityError")
+          fail("Camera access was blocked. Allow it from the camera icon in your browser's address bar, then try again — or use “choose file” instead.");
+        else if (n === "NotFoundError" || n === "OverconstrainedError")
+          fail("No camera found on this device. Use “choose file” instead.");
+        else if (n === "NotReadableError")
+          fail("Another app is using the camera. Close it and try again.");
+        else fail("Couldn't start the camera. Use “choose file” instead.");
+      }
+    }
+
+    ov.querySelector("#camX").onclick = () => done(null);
+    ov.querySelector("#camFlip").onclick = () => { facing = facing === "environment" ? "user" : "environment"; start(); };
+    ov.querySelector("#camShot").onclick = () => {
+      if (!v.videoWidth) return;
+      const c = document.createElement("canvas");
+      c.width = v.videoWidth; c.height = v.videoHeight;
+      c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+      c.toBlob(b => done(b ? new File([b], "shot-" + Date.now() + ".jpg", { type: "image/jpeg" }) : null), "image/jpeg", 0.92);
+    };
+    start();
+  });
+}
+
 // ---------- AI capture flow ----------
 const SHOTS = [
   { kind: "front", label: "Front", hint: "Whole item, straight on, good light" },
@@ -258,9 +326,11 @@ function renderCapture() {
   app.innerHTML = `<h1 class="h1">Add item with AI</h1>
     <div class="muted" style="font-size:.85rem;margin-bottom:6px">Take the shots you can. The marks photo matters most.</div>
     <div class="card"><div class="shots" id="shots">${SHOTS.map(s => `
-      <label class="shot" data-kind="${s.kind}"><input type="file" accept="image/*" capture="environment" hidden>
-        <div class="ph" id="ph-${s.kind}">📷</div><div class="sl">${s.label}</div><div class="sh">${s.hint}</div></label>`).join("")}</div>
+      <div class="shot" data-kind="${s.kind}"><input type="file" accept="image/*" capture="environment" hidden>
+        <div class="ph" id="ph-${s.kind}">📷</div><div class="sl">${s.label}</div><div class="sh">${s.hint}</div>
+        <a href="#" class="pick" style="font-size:.64rem;color:var(--sub);text-decoration:underline">choose file</a></div>`).join("")}</div>
       <div style="height:8px"></div>
+      <button class="btn sec sm" id="moreCam" style="display:none">📷 Another photo</button>
       <label class="btn sec sm" style="display:inline-block">+ More photos <input type="file" accept="image/*" multiple hidden id="moreShots"></label>
       <span class="muted" id="moreCount" style="font-size:.82rem;margin-left:8px"></span>
     </div>
@@ -278,11 +348,30 @@ function renderCapture() {
       <button class="btn sec" id="cCancel">Cancel</button>
     </div>`;
   const more = [];
+  const setShot = (kind, f) => {
+    shots[kind] = f;
+    const ph = $("#ph-" + kind); ph.innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">`;
+  };
   app.querySelectorAll(".shot input").forEach(inp => inp.onchange = () => {
     const kind = inp.closest(".shot").dataset.kind, f = inp.files[0]; if (!f) return;
-    shots[kind] = f; const ph = $("#ph-" + kind); ph.innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">`;
+    setShot(kind, f);
   });
-  $("#moreShots").onchange = e => { more.push(...e.target.files); $("#moreCount").textContent = more.length + " extra"; };
+  // Tapping a tile opens the live viewfinder where we can; "choose file" is always there as a fallback.
+  app.querySelectorAll(".shot").forEach(tile => {
+    const kind = tile.dataset.kind, inp = tile.querySelector("input"), s = SHOTS.find(x => x.kind === kind);
+    tile.querySelector(".pick").onclick = e => { e.preventDefault(); e.stopPropagation(); inp.click(); };
+    tile.onclick = async () => {
+      if (!canUseCamera()) return inp.click();
+      const f = await openCamera(s ? s.label + " — " + s.hint : "Take a photo");
+      if (f) setShot(kind, f);
+    };
+  });
+  const bumpMore = () => $("#moreCount").textContent = more.length ? more.length + " extra" : "";
+  $("#moreShots").onchange = e => { more.push(...e.target.files); bumpMore(); };
+  if (canUseCamera()) {
+    const mc = $("#moreCam"); mc.style.display = "inline-block"; mc.style.marginRight = "8px";
+    mc.onclick = async () => { const f = await openCamera("Another photo"); if (f) { more.push(f); bumpMore(); } };
+  }
   $("#cCancel").onclick = renderItems;
   $("#cGo").onclick = async () => {
     const files = [...Object.entries(shots).map(([k, f]) => ({ kind: k, f })), ...more.map(f => ({ kind: "other", f }))];
