@@ -365,6 +365,66 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+// ---------- precious metal: live prices and a melt floor ----------
+// The model knows metallurgy (it correctly read a wartime nickel as 1.75g Ag) but its spot price is
+// frozen at training time — it priced 9 oz of silver off ~$25/oz while writing "at current spot".
+// So: the model supplies fine metal weight, we supply today's price and do the arithmetic ourselves.
+const METAL_SYMBOL = { silver: "SI=F", gold: "GC=F", platinum: "PL=F", palladium: "PA=F" };
+let _spot = { at: 0, data: null };
+
+export async function metalPrices() {
+  if (_spot.data && Date.now() - _spot.at < 3600e3) return _spot.data;
+  const out = {};
+  await Promise.all(Object.entries(METAL_SYMBOL).map(async ([metal, sym]) => {
+    try {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 8000);
+      // COMEX front-month, not true spot — within about 1% and free without a key. Labelled honestly.
+      const r = await fetch(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=1d`,
+        { headers: { "user-agent": "Mozilla/5.0" }, signal: ac.signal });
+      clearTimeout(t);
+      if (!r.ok) return;
+      const m = (await r.json())?.chart?.result?.[0]?.meta;
+      const p = Number(m?.regularMarketPrice);
+      if (Number.isFinite(p) && p > 0) out[metal] = p;
+    } catch {}
+  }));
+  if (!Object.keys(out).length) return _spot.data;   // keep a stale copy over nothing
+  _spot = { at: Date.now(), data: { ...out, as_of: new Date().toISOString(), source: "COMEX front-month futures (Yahoo Finance)" } };
+  return _spot.data;
+}
+
+const METAL_SYSTEM = `You are a precious-metals buyer assessing scrap/melt value. Given an item description,
+work out the TOTAL fine precious metal it contains. Be literal and show the arithmetic in "basis".
+Return ONLY JSON: {"metal": "silver|gold|platinum|palladium|none", "fine_troy_oz": 0.0, "basis": "", "confidence": 0.0}
+
+Rules:
+- fine_troy_oz is the TOTAL pure metal across every piece, not per item and not gross weight.
+- Multiply out counts: "4 rolls of wartime nickels" = 4 x 40 = 160 coins.
+- Common fine weights: US 90% silver dime 0.0723 ozt, quarter 0.1808, half 0.3617, dollar 0.7734;
+  40% silver half (1965-1970) 0.1479; wartime nickel (1942-1945) 0.0563; Silver Eagle 1.0.
+  Sterling .925 and coin silver .900 multiply gross weight by that fraction.
+  Gold: 10k = .4167, 14k = .5833, 18k = .750, 22k = .9167 of gross weight.
+- Silver PLATE, silverplate, EPNS, "German silver", nickel silver contain NO recoverable silver: return "none".
+- If the piece is not precious metal, or you cannot establish a weight or count, return metal "none" and 0.
+- Never guess a weight you have no basis for. confidence 0.0-1.0.`;
+
+async function meltEstimate(c, ident, req, findings) {
+  const desc = [
+    `Item: ${ident.name}`,
+    ident.maker ? `Maker: ${ident.maker}` : "",
+    ident.period ? `Period: ${ident.period}` : "",
+    `Dealer description: ${String(req.description || "").trim() || "(none)"}`,
+    `Dealer markings: ${String(req.markings || "").trim() || "(none)"}`,
+    `Vision notes: ${findings.map(f => [f.object_type, ...(f.materials || []), ...(f.notable_features || [])].filter(Boolean).join("; ")).filter(Boolean).join(" | ").slice(0, 600)}`,
+  ].filter(Boolean).join("\n");
+  const r = await textJson(c, METAL_SYSTEM, desc, 800);
+  const metal = String(r.metal || "none").toLowerCase();
+  const oz = num(r.fine_troy_oz);
+  if (!METAL_SYMBOL[metal] || !(oz > 0)) return null;
+  return { metal, fine_troy_oz: oz, basis: String(r.basis || ""), confidence: clamp(r.confidence ?? 0.5) };
+}
+
 // ---------- the pipeline ----------
 export async function appraise(env, req) {
   const c = cfg(env);
@@ -375,7 +435,15 @@ export async function appraise(env, req) {
   const findings = await mapLimit(req.photos, 3, p => photoFindings(c, p.kind, p.url));
   if (findings.every(f => f.error)) warnings.push("vision model failed on every photo; appraisal relies on dealer text only");
 
-  const sheet = buildEvidenceSheet(req, findings);
+  // Give the reasoner today's metal prices up front so its own number starts from reality.
+  const spot = await metalPrices();
+  const spotSheet = spot
+    ? `\n\n## Today's metal prices (${spot.source}, ${spot.as_of.slice(0, 10)})\n` +
+      Object.keys(METAL_SYMBOL).filter(k => spot[k]).map(k => `${k}: $${spot[k].toFixed(2)} per troy ounce`).join("\n") +
+      `\nIf this item is precious metal, price it from THESE numbers. Do not use a remembered spot price.`
+    : "";
+
+  const sheet = buildEvidenceSheet(req, findings) + spotSheet;
   const user = `${sheet}\n\n## Required output schema\n${IDENTIFY_SCHEMA}`;
   let first = await textJson(c, IDENTIFY_SYSTEM(currency), user);
   if (incomplete(first)) {
@@ -437,7 +505,36 @@ export async function appraise(env, req) {
     warnings.push("no live comparables (TAVILY_API_KEY unset or no hits); price range is model-estimated");
   }
 
+  // Melt floor, last, so the comps re-pricer cannot undo it. Scrap value is arithmetic, not opinion:
+  // whatever the piece is worth as an antique, it is worth at least its metal.
+  let melt = null;
+  if (spot) {
+    try {
+      const m = await meltEstimate(c, ident, req, findings);
+      if (m && spot[m.metal]) {
+        const value = m.fine_troy_oz * spot[m.metal];
+        melt = {
+          metal: m.metal, fine_troy_oz: Math.round(m.fine_troy_oz * 1000) / 1000,
+          price_per_oz: spot[m.metal], value: Math.round(value),
+          basis: m.basis, as_of: spot.as_of, source: spot.source,
+        };
+        if (value > price.low) {
+          const was = `$${Math.round(price.low)}-${Math.round(price.high)}`;
+          price.low = Math.round(value);
+          price.high = Math.max(Math.round(price.high), Math.round(value * 1.2));
+          price.floor = Math.max(Math.round(price.floor), Math.round(value));
+          price.suggested_retail = Math.min(Math.max(price.suggested_retail, Math.round(value * 1.1)), price.high);
+          price.basis = (`Raised to metal content: ${melt.fine_troy_oz} ozt ${m.metal} at $${spot[m.metal].toFixed(2)}/ozt = $${melt.value} melt. ` + price.basis).trim();
+          warnings.push(`price raised to melt value ($${melt.value}); the model's own estimate was ${was}`);
+        }
+      }
+    } catch (e) { warnings.push(`melt check failed: ${e.message}`); }
+  } else {
+    warnings.push("live metal prices unavailable; no melt floor applied");
+  }
+
   return {
+    melt,
     item_id: req.item_id,
     identification: ident,
     confidence: clamp(first.confidence ?? 0.5),
