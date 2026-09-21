@@ -179,22 +179,19 @@ async function textJson(c, system, user, maxTokens = 1800) {
 const PRICE_RE = /\$\s?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)/;
 const firstPrice = t => { const m = PRICE_RE.exec(t || ""); if (!m) return null; const v = parseFloat(m[1].replace(/,/g, "")); return Number.isFinite(v) ? v : null; };
 
-async function searchComps(env, query, limit = 5) {
-  if (!env.TAVILY_API_KEY || !String(query || "").trim()) return [];
+// Antique marketplaces first, because that is the common case and they carry sold prices.
+const ANTIQUE_DOMAINS = ["ebay.com", "liveauctioneers.com", "worthpoint.com", "1stdibs.com",
+                         "chairish.com", "invaluable.com", "rubylane.com", "etsy.com"];
+
+async function tavily(env, query, domains, limit) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 20000);
   try {
+    const body = { api_key: env.TAVILY_API_KEY, query, max_results: limit };
+    if (domains) body.include_domains = domains;
     const r = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        api_key: env.TAVILY_API_KEY,
-        query: `${query} sold price antique`,
-        max_results: limit,
-        include_domains: ["ebay.com", "liveauctioneers.com", "worthpoint.com", "1stdibs.com",
-                          "chairish.com", "invaluable.com", "rubylane.com", "etsy.com"],
-      }),
-      signal: ac.signal,
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body), signal: ac.signal,
     });
     if (!r.ok) return [];
     const j = await r.json();
@@ -207,6 +204,35 @@ async function searchComps(env, query, limit = 5) {
     }));
   } catch { return []; }
   finally { clearTimeout(t); }
+}
+
+async function searchComps(env, query, limit = 5) {
+  if (!env.TAVILY_API_KEY || !String(query || "").trim()) return [];
+  // The word "antique" used to be welded onto every query. On a box of DDR4 server RAM that is
+  // poison: it guarantees no hits, the price falls back to what the model remembers, and on
+  // anything whose market has moved the answer is wildly wrong. Ask plainly first.
+  let hits = await tavily(env, `${query} sold price`, ANTIQUE_DOMAINS, limit);
+  const priced = hs => hs.filter(h => h.price > 0).length;
+  // Nothing with an actual number in it means the category is outside those marketplaces.
+  // Search the open web before falling back to memory.
+  if (priced(hits) < 2) {
+    const wide = await tavily(env, `${query} for sale price`, null, limit);
+    const seen = new Set(hits.map(h => h.url));
+    hits = [...hits, ...wide.filter(h => !seen.has(h.url) && !isNoise(h))].slice(0, limit + 3);
+  }
+  return hits;
+}
+
+// An open-web search turns up news and finance pages whose dollar figures are not prices — a CNBC
+// piece on chip demand came back as a "$3 comp". Feeding those to the re-pricer is worse than
+// finding nothing, because they look like evidence.
+const NOISE_HOST = /(^|\.)(cnbc|reuters|bloomberg|investing|finance\.yahoo|marketwatch|forbes|wsj|ft|barrons|seekingalpha|fool|benzinga|rocketreach|zoominfo|linkedin|wikipedia|glassdoor)\./i;
+const NOISE_WORD = /\b(shares?|stock|earnings|quarterly|revenue|billion|acquisition|merger|ipo|analyst|forecast|benchmark|salary|net worth)\b/i;
+function isNoise(h) {
+  const host = String(h.source || "");
+  if (NOISE_HOST.test(host)) return true;
+  if (NOISE_WORD.test(`${h.title} ${h.note}`)) return true;
+  return false;
 }
 
 // ---------- helpers (pipeline.py) ----------
@@ -485,6 +511,9 @@ export async function appraise(env, req) {
                   ...pick(first.identification || {}, IDENT_KEYS) };
   for (const k of IDENT_KEYS) ident[k] = String(ident[k] || "");
   if (!ident.name.trim()) ident.name = (findings.find(f => f.object_type) || {}).object_type || "Unidentified item";
+  // The model's own name is kept for searching even when the dealer's wording wins the display.
+  // "256 gb total" is what the dealer typed; "SK Hynix 32GB DDR4-2400 ECC RDIMM" is what finds comps.
+  let searchName = ident.name;
   if (ignoresDealer(ident.name, req.description)) {
     warnings.push(`model named it '${ident.name}'; using the dealer's description for the name instead`);
     ident.name = dealerName(req.description);
@@ -516,7 +545,7 @@ export async function appraise(env, req) {
   price.basis = cleanedBasis.length ? cleanedBasis[0] : price.basis;
 
   const comparables = [];
-  const hits = await searchComps(env, compsQuery(ident));
+  const hits = await searchComps(env, compsQuery({ ...ident, name: searchName }));
   if (hits.length) {
     const repriceUser = `Item: ${JSON.stringify(ident)}\nCondition: ${listing.condition_grade}\n` +
       `Current price_range: ${JSON.stringify(price)}\n\nComparables:\n${JSON.stringify(hits, null, 1)}`;
@@ -528,7 +557,21 @@ export async function appraise(env, req) {
         if (cp && typeof cp === "object" && cp.title) comparables.push(pick(cp, COMP_KEYS));
     } catch (e) { warnings.push(`comps re-pricing failed: ${e.message}`); }
   } else {
-    warnings.push("no live comparables (TAVILY_API_KEY unset or no hits); price range is model-estimated");
+    // This is the dangerous state, not a footnote: with no comps the number is the model's
+    // recollection of a market it last saw during training. Fine for a Victorian jug, ruinous
+    // for anything whose price has moved — memory, tools, bullion, anything with a spot market.
+    warnings.push("NO LIVE COMPARABLES FOUND — this price is the model's best guess from memory, " +
+      "not today's market. Check it yourself before you sell, especially for electronics, metals " +
+      "or anything sold by the unit.");
+    price.basis = (price.basis + " No live comparables were found, so this is a memory-based estimate.").trim();
+  }
+  // Per-unit price for a lot. "$960 the box" and "$150 a stick" are different conversations, and
+  // the second is the one that gets the money.
+  const lot = /(\d{1,3})\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count)\b/i.exec(
+    `${listing.title} ${req.description}`);
+  const n = lot ? Number(lot[1]) : 0;
+  if (n > 1 && price.suggested_retail > 0) {
+    price.basis = (price.basis + ` About $${Math.round(price.suggested_retail / n)} per unit across ${n}.`).trim();
   }
 
   // Melt floor, last, so the comps re-pricer cannot undo it. Scrap value is arithmetic, not opinion:
