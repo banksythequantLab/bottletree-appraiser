@@ -31,9 +31,8 @@
     "NEBIUS_BASE_URL": "https://api.tokenfactory.nebius.com/v1/",
     "TEXT_MODEL": "nvidia/nemotron-3-super-120b-a12b",
     "VISION_MODEL": "google/gemma-3-27b-it",
-    "PUBLIC_ORIGIN": "https://bottletree-app.dj-b02.workers.dev",
+    "PUBLIC_ORIGIN": "https://roadshow-app.dj-b02.workers.dev",
     // RevenueCat public SDK key for the Play Store app (Play service credentials validated 2026-09-20)
-    "RC_ANDROID_KEY": "goog_bruXXcAjAfxUxeHpcoCYElturCQ",
     // Google OAuth *web* client ID (project bottletree-app-2026). Public by design — it ships in the
     // page and is the `aud` we require on every ID token. The client *secret* is not used: we verify
     // ID tokens against Google's JWKS, we never do a server-side code exchange.

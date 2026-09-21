@@ -1,4 +1,4 @@
-// Bottle Tree billing UI — the paywall and the "estimates left" pill.
+// Estate Sale Road Show billing UI — the paywall and the "estimates left" pill.
 // Native (Capacitor Android): purchases go through RevenueCat -> Google Play; the RevenueCat webhook credits the
 // account server-side, so after a purchase we just re-read /api/me/plan. Web: shows the plans + a Play link.
 window.BTBilling = (() => {
@@ -82,7 +82,7 @@ window.BTBilling = (() => {
                  : webLink
                  ? `<div class="muted" style="font-size:.8rem;margin-top:8px">Checkout opens in a new tab. Your estimates land on this same account${plan && plan.play_url ? `, and on <a href="${esc(plan.play_url)}" target="_blank" rel="noopener" style="color:var(--cobalt)">the Android app</a>` : ""}.</div>
                     <div id="pwWait" class="muted" style="font-size:.8rem;margin-top:8px;display:none">Waiting for the purchase to land… <a href="#" id="pwCheck" style="color:var(--cobalt)">check now</a></div>`
-                 : `<div class="muted" style="font-size:.8rem;margin-top:8px">Buy estimates in the Bottle Tree Android app${plan && plan.play_url ? ` — <a href="${esc(plan.play_url)}" target="_blank" rel="noopener" style="color:var(--cobalt)">get it on Google Play</a>` : " (Google Play, coming this week)"}. Your inventory is the same account everywhere.</div>`}
+                 : `<div class="muted" style="font-size:.8rem;margin-top:8px">Estimates aren't on sale here yet. Running the sale, the labels and the cashier are free and always will be.</div>`}
         <div class="muted" style="font-size:.7rem;margin-top:10px">Estimates are AI guesses for pricing help, not formal appraisals. Subscriptions renew monthly; cancel any time in Google Play.</div>
       </div>`;
     document.body.appendChild(sheet);

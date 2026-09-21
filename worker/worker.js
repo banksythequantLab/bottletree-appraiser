@@ -1,4 +1,4 @@
-// Bottle Tree app v0.3 — API worker: accounts, sales, photos (R2), AI appraisals (Nebius), storefront + Stripe.
+// Estate Sale Road Show — API worker (fork of Bottle Tree v0.3) — API worker: accounts, sales, photos (R2), AI appraisals (Nebius), storefront + Stripe.
 // Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
 import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent } from "./billing.js";
 import { appraise } from "./appraiser.js";
@@ -193,7 +193,7 @@ function shopPage(shop, title, body) {
 <title>${esc(title)}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Nunito+Sans:wght@400;700;800&display=swap" rel="stylesheet">
 <style>${SHOP_CSS}</style></head><body><header><div class="wrap"><h1><a href="/shop/${esc(shop.shop_slug)}">${esc(shop.shop_name || shop.shop_slug)}</a></h1>
 ${shop.shop_blurb ? `<span class="blurb">${esc(shop.shop_blurb)}</span>` : ""}</div></header><main class="wrap">${body}</main>
-<footer>Powered by Bottle Tree · listings drafted with NVIDIA Nemotron on Nebius</footer></body></html>`;
+<footer>Powered by Estate Sale Road Show · listings drafted with NVIDIA Nemotron on Nebius</footer></body></html>`;
 }
 function firstPhoto(photos) { return photos.find(p => p.kind === "front") || photos[0]; }
 
@@ -550,7 +550,7 @@ export default {
         if (parts[3] === "tag" && parts.length === 5 && m === "GET") {
           const raw = decodeURIComponent(parts[4]);
           const mm = /^(?:BT-[0-9a-f]{8}-)?0*(\d{1,6})$/i.exec(raw.trim());
-          if (!mm) return J({ error: "not a Bottle Tree tag" }, 400);
+          if (!mm) return J({ error: "not one of this sale's tags" }, 400);
           const it = await db.prepare(
             "SELECT i.*, (SELECT r2_key FROM photos p WHERE p.item_id=i.id ORDER BY p.sort, p.created_at LIMIT 1) AS thumb_key " +
             "FROM items i WHERE i.sale_id=? AND i.tag_no=?").bind(sid, Number(mm[1])).first();

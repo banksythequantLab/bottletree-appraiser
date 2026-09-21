@@ -1,4 +1,4 @@
-// Bottle Tree app v0.1 — front-end
+// Estate Sale Road Show — front end (fork of Bottle Tree v0.1) — front-end
 const $ = s => document.querySelector(s);
 const app = $("#app"), tabs = $("#tabs"), ctx = $("#ctx"), backBtn = $("#backBtn"),
       cartbar = $("#cartbar");
@@ -570,7 +570,7 @@ async function renderShopSetup(done) {
   app.innerHTML = `<h1 class="h1">Your online shop</h1>
     <div class="muted" style="font-size:.85rem">Approved items appear at your shop address. Set it once.</div>
     <div class="card">
-      <label>Shop name</label><input id="sName" value="${esc(me.shop_name || "")}" placeholder="e.g. Bottle Tree Antiques">
+      <label>Shop name</label><input id="sName" value="${esc(me.shop_name || "")}" placeholder="e.g. The Miller Estate">
       <div style="height:8px"></div>
       <label>Shop address</label><div class="row"><span class="muted" style="font-size:.85rem">${location.origin}/shop/</span><input id="sSlug" value="${esc(me.shop_slug || "")}" placeholder="bottle-tree" style="flex:1"></div>
       <div style="height:8px"></div>
@@ -809,7 +809,7 @@ async function renderSummary() {
       ${s.split.length ? s.split.map(r => `<div class="split"><span>${esc(r.seller)} <span class="muted" style="font-size:.82rem">· ${r.items} item${r.items === 1 ? "" : "s"}</span></span><span class="amt">${money(r.cents)}</span></div>`).join("")
         : `<div class="muted" style="padding:10px 0">No sales yet — the split fills in as you sell.</div>`}
     </div>
-    <div class="muted" style="font-size:.8rem;text-align:center;margin-top:10px">Bottle Tree v0.3 · cash in store, cards online · AI appraisals by NVIDIA Nemotron on Nebius.</div>`;
+    <div class="muted" style="font-size:.8rem;text-align:center;margin-top:10px">Estate Sale Road Show · free POS · cash in person, cards online · AI appraisals by NVIDIA Nemotron on Nebius.</div>`;
 }
 
 // tab bar + back
