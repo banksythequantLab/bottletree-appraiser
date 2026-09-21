@@ -1,6 +1,7 @@
 // Bottle Tree app v0.3 — API worker: accounts, sales, photos (R2), AI appraisals (Nebius), storefront + Stripe.
 // Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
 import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent } from "./billing.js";
+import { appraise } from "./appraiser.js";
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const enc = new TextEncoder();
@@ -82,7 +83,10 @@ async function newSession(db, userId) {
   return tok;
 }
 
-// ---------- appraisal (calls the Nebius-hosted FastAPI service) ----------
+// ---------- appraisal ----------
+// Runs inside the Worker: appraiser.js talks to Nebius Token Factory and Tavily directly. It used to
+// POST to a FastAPI container, which meant something had to be hosted and awake; nothing does now.
+// Set APPRAISER_URL to fall back to that container (the offline kiosk still runs it).
 async function runAppraisal(env, appraisalId, item, photos) {
   const db = env.DB;
   try {
@@ -90,16 +94,22 @@ async function runAppraisal(env, appraisalId, item, photos) {
       item_id: item.id,
       description: item.description || "",
       markings: item.markings || "",
+      currency: "USD",
       photos: photos.map(p => ({ url: `${env.PUBLIC_ORIGIN}/p/${p.r2_key}`, kind: p.kind })),
     };
-    const headers = { "content-type": "application/json" };
-    if (env.APPRAISER_SERVICE_KEY) headers["x-appraiser-key"] = env.APPRAISER_SERVICE_KEY;
-    // Nebius Serverless Endpoints front the container with their own bearer token (--auth token)
-    if (env.APPRAISER_TOKEN) headers["authorization"] = `Bearer ${env.APPRAISER_TOKEN}`;
-    const r = await fetch(`${env.APPRAISER_URL}/appraise`, { method: "POST", headers, body: JSON.stringify(body) });
-    const text = await r.text();
-    if (!r.ok) throw new Error(`appraiser ${r.status}: ${text.slice(0, 300)}`);
-    const result = JSON.parse(text);
+    let result, text;
+    if (env.APPRAISER_URL) {
+      const headers = { "content-type": "application/json" };
+      if (env.APPRAISER_SERVICE_KEY) headers["x-appraiser-key"] = env.APPRAISER_SERVICE_KEY;
+      if (env.APPRAISER_TOKEN) headers["authorization"] = `Bearer ${env.APPRAISER_TOKEN}`;
+      const r = await fetch(`${env.APPRAISER_URL}/appraise`, { method: "POST", headers, body: JSON.stringify(body) });
+      text = await r.text();
+      if (!r.ok) throw new Error(`appraiser ${r.status}: ${text.slice(0, 300)}`);
+      result = JSON.parse(text);
+    } else {
+      result = await appraise(env, body);
+      text = JSON.stringify(result);
+    }
     await db.prepare("UPDATE appraisals SET status='done', result_json=?, model_text=?, model_vision=?, completed_at=? WHERE id=?")
       .bind(text, result.models?.text || null, result.models?.vision || null, now(), appraisalId).run();
     // pre-fill AI copy on the item (dealer still approves before it goes live)
@@ -532,7 +542,7 @@ export default {
         if (parts[3] === "appraise" && m === "POST") {
           const photos = (await db.prepare("SELECT * FROM photos WHERE item_id=? ORDER BY sort, created_at").bind(iid).all()).results;
           if (!photos.length) return J({ error: "add at least one photo first" }, 400);
-          if (!env.APPRAISER_URL) return J({ error: "appraiser not configured" }, 503);
+          if (!env.APPRAISER_URL && !env.NEBIUS_API_KEY) return J({ error: "appraiser not configured" }, 503);
           const b = await readJson(request);
           if (b.description !== undefined || b.markings !== undefined) {
             await db.prepare("UPDATE items SET description=COALESCE(?,description), markings=COALESCE(?,markings) WHERE id=?")
@@ -544,7 +554,8 @@ export default {
           if (!fundedBy) return J({ error: "You're out of estimates", paywall: true, plan: await planFor(db, userId) }, 402);
           const apId = uid();
           await db.prepare("INSERT INTO appraisals (id,item_id,status,created_at,funded_by) VALUES (?,?,'pending',?,?)").bind(apId, iid, now(), fundedBy).run();
-          ctx.waitUntil(runAppraisal(env, apId, item, photos));
+          if (env.APPRAISALS) await env.APPRAISALS.send({ appraisalId: apId, itemId: iid });
+          else ctx.waitUntil(runAppraisal(env, apId, item, photos));   // local dev without the queue binding
           return J({ appraisal_id: apId, status: "pending", funded_by: fundedBy }, 202);
         }
         if (parts[3] === "publish" && m === "POST") {
@@ -570,6 +581,27 @@ export default {
       return J({ error: "not found" }, 404);
     } catch (e) {
       return J({ error: String(e && e.message || e) }, 500);
+    }
+  },
+
+  // An appraisal takes ~2 minutes of waiting on Token Factory. ctx.waitUntil() only buys 30s after the
+  // response, so the old fire-and-forget would have been killed mid-run — leaving the row 'pending'
+  // forever and silently eating the dealer's estimate. A queue consumer gets the time it needs.
+  async queue(batch, env) {
+    for (const msg of batch.messages) {
+      try {
+        const { appraisalId, itemId } = msg.body;
+        const ap = await env.DB.prepare("SELECT status FROM appraisals WHERE id=?").bind(appraisalId).first();
+        if (!ap || ap.status !== "pending") { msg.ack(); continue; }   // already done, or gone
+        const item = await env.DB.prepare("SELECT * FROM items WHERE id=?").bind(itemId).first();
+        if (!item) { msg.ack(); continue; }
+        const photos = (await env.DB.prepare("SELECT * FROM photos WHERE item_id=? ORDER BY sort, created_at").bind(itemId).all()).results;
+        await runAppraisal(env, appraisalId, item, photos);
+        msg.ack();
+      } catch (e) {
+        // runAppraisal already records its own failures and refunds; this is for anything outside it.
+        msg.retry();
+      }
     }
   }
 };

@@ -17,9 +17,23 @@
   "r2_buckets": [
     { "binding": "PHOTOS", "bucket_name": "bottletree-photos" }
   ],
+  "queues": {
+    "producers": [{ "binding": "APPRAISALS", "queue": "bottletree-appraisals" }],
+    // One appraisal per invocation: they take ~2 min each and batching them would stack that up.
+    "consumers": [{
+      "queue": "bottletree-appraisals",
+      "max_batch_size": 1,
+      "max_concurrency": 6,
+      "max_retries": 2,
+      "dead_letter_queue": "bottletree-appraisals-dlq"
+    }]
+  },
   "vars": {
-    // Public URL of the FastAPI appraiser on Nebius AI Cloud (no trailing slash)
-    "APPRAISER_URL": "http://127.0.0.1:8089",
+    // No APPRAISER_URL: the appraisal runs inside the Worker (appraiser.js -> Token Factory + Tavily).
+    // Setting it again routes to the FastAPI container instead, which is how the offline kiosk runs.
+    "NEBIUS_BASE_URL": "https://api.tokenfactory.nebius.com/v1/",
+    "TEXT_MODEL": "nvidia/nemotron-3-super-120b-a12b",
+    "VISION_MODEL": "google/gemma-3-27b-it",
     "PUBLIC_ORIGIN": "https://bottletree-app.dj-b02.workers.dev",
     // RevenueCat public SDK key for the Play Store app (Play service credentials validated 2026-09-20)
     "RC_ANDROID_KEY": "goog_bruXXcAjAfxUxeHpcoCYElturCQ",
