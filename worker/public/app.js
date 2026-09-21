@@ -178,8 +178,23 @@ async function renderSales() {
   el.innerHTML = list.map(s => `<div class="li tap" data-id="${s.id}">
       <div><div class="nm">${esc(s.name)}</div><div class="muted" style="font-size:.82rem">${s.items} items · ${money(s.revenue_cents)} sold</div></div>
       <span class="pr">${s.status === "open" ? "" : "✓ "}<span class="pill">${s.status}</span></span>
+      <button class="btn rust sm" data-del="${s.id}" data-name="${esc(s.name)}" title="Delete sale" style="margin-left:8px">✕</button>
     </div>`).join("");
+  el.querySelectorAll("[data-del]").forEach(b => b.onclick = e => { e.stopPropagation(); deleteSale(b.dataset.del, b.dataset.name); });
   el.querySelectorAll(".li").forEach(li => li.onclick = () => openSale(li.dataset.id));
+}
+async function deleteSale(id, name) {
+  if (!confirm(`Delete "${name}"?\n\nThis removes its items, photos and sellers for good.`)) return;
+  try {
+    await api("/sales/" + id, { method: "DELETE" });
+  } catch (e) {
+    // The API refuses a sale with recorded sales unless we say we mean it.
+    if (!/recorded sales/i.test(e.message)) return toast(e.message);
+    if (!confirm(`"${name}" has recorded sales in it.\n\nDeleting it also erases those takings and the seller payout split. There is no undo.\n\nStill delete?`)) return;
+    try { await api("/sales/" + id + "?force=1", { method: "DELETE" }); }
+    catch (e2) { return toast(e2.message); }
+  }
+  toast("Sale deleted"); renderSales();
 }
 async function createSale() {
   const name = $("#newName").value.trim();

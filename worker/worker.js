@@ -458,6 +458,23 @@ export default {
           const txns = (await db.prepare("SELECT * FROM txns WHERE sale_id=? ORDER BY created_at DESC").bind(sid).all()).results;
           return J({ sale, sellers, items, txns });
         }
+        if (parts.length === 3 && m === "DELETE") {
+          // A sale with recorded sales is the dealer's books — refuse unless they say so explicitly.
+          const sold = await db.prepare("SELECT COUNT(*) AS n FROM txns WHERE sale_id=?").bind(sid).first();
+          if (sold.n && url.searchParams.get("force") !== "1")
+            return J({ error: "This sale has recorded sales", sold: sold.n, needs_force: true }, 409);
+          const ps = (await db.prepare(
+            "SELECT p.r2_key FROM photos p JOIN items i ON i.id=p.item_id WHERE i.sale_id=?").bind(sid).all()).results;
+          // R2 deletes are best-effort: a failed key must not leave the rows behind.
+          await Promise.all(ps.map(x => env.PHOTOS.delete(x.r2_key).catch(() => {})));
+          await db.prepare("DELETE FROM photos WHERE item_id IN (SELECT id FROM items WHERE sale_id=?)").bind(sid).run();
+          await db.prepare("DELETE FROM appraisals WHERE item_id IN (SELECT id FROM items WHERE sale_id=?)").bind(sid).run();
+          await db.prepare("DELETE FROM items WHERE sale_id=?").bind(sid).run();
+          await db.prepare("DELETE FROM txns WHERE sale_id=?").bind(sid).run();
+          await db.prepare("DELETE FROM sellers WHERE sale_id=?").bind(sid).run();
+          const r = await db.prepare("DELETE FROM sales WHERE id=? AND user_id=?").bind(sid, userId).run();
+          return J({ deleted: r.meta.changes, photos: ps.length });
+        }
         if (parts[3] === "sellers" && m === "POST") {
           const b = await readJson(request); const name = (b.name || "").trim();
           if (!name) return J({ error: "name required" }, 400);
