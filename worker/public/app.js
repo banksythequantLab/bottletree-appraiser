@@ -473,7 +473,7 @@ async function renderItemDetail(id) {
       ${r.melt ? `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--green);background:var(--bg);font-size:.82rem">
           <b>Metal content:</b> ${r.melt.fine_troy_oz} ozt ${esc(r.melt.metal)} × $${r.melt.price_per_oz.toFixed(2)}/ozt = <b>$${r.melt.value} melt</b>
           <div class="muted" style="margin-top:3px">${esc(r.melt.basis)}</div>
-          <div class="muted" style="margin-top:3px;font-size:.92em">${esc(r.melt.source)}, ${esc(String(r.melt.as_of).slice(0, 10))}. Scrap is a floor — never sell below it.</div>
+          <div class="muted" style="margin-top:3px;font-size:.92em">${esc(r.melt.source)}, ${esc(String(r.melt.as_of).slice(0, 10))}. ${r.melt.applied === false ? "Weight is an estimate, so this has <b>not</b> been used as a price floor — weigh it to be sure." : "Scrap is a floor — never sell below it."}</div>
         </div>` : ""}
       <div class="muted" style="font-size:.82rem">${esc(pr.basis)}</div>
       ${r.evidence.length ? `<h3 style="font-size:.95rem;margin-top:12px">Why</h3><ul class="ev">${r.evidence.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}

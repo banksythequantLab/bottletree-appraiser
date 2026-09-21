@@ -406,8 +406,34 @@ Rules:
   Sterling .925 and coin silver .900 multiply gross weight by that fraction.
   Gold: 10k = .4167, 14k = .5833, 18k = .750, 22k = .9167 of gross weight.
 - Silver PLATE, silverplate, EPNS, "German silver", nickel silver contain NO recoverable silver: return "none".
+- WEIGHTED / LOADED pieces are mostly cement or pitch, not metal: sterling knife handles, most candlesticks,
+  weighted compotes and trophy bases. Do NOT multiply their gross weight. A weighted knife holds roughly
+  0.5-1 ozt of actual silver regardless of how heavy it feels; a weighted candlestick roughly 2-4 ozt.
+  If a lot mixes weighted and solid pieces and you cannot separate them, still answer: treat the knives as
+  weighted (about 0.75 ozt each), treat everything else as solid at gross x fineness, and state that
+  assumption in "basis". Do NOT return "none" for a lot whose weight or count you were given — a
+  conservative number is useful, a refusal is not. When genuinely torn, UNDERSTATE: this becomes a price
+  floor, and too high a floor costs the dealer a sale.
 - If the piece is not precious metal, or you cannot establish a weight or count, return metal "none" and 0.
 - Never guess a weight you have no basis for. confidence 0.0-1.0.`;
+
+// Standalone scrap check: metal content and today's value, no photos and no full appraisal.
+export async function meltCheck(env, { name = "", maker = "", period = "", description = "", markings = "" }) {
+  const c = cfg(env);
+  if (!c.key) throw new Error("NEBIUS_API_KEY is not set");
+  const spot = await metalPrices();
+  if (!spot) return { melt: null, error: "live metal prices unavailable" };
+  const m = await meltEstimate(c, { name, maker, period }, { description, markings }, []);
+  if (!m || !spot[m.metal]) return { melt: null, spot };
+  return {
+    melt: {
+      metal: m.metal, fine_troy_oz: Math.round(m.fine_troy_oz * 1000) / 1000,
+      price_per_oz: spot[m.metal], value: Math.round(m.fine_troy_oz * spot[m.metal]),
+      basis: m.basis, confidence: m.confidence, as_of: spot.as_of, source: spot.source,
+    },
+    spot,
+  };
+}
 
 async function meltEstimate(c, ident, req, findings) {
   const desc = [
@@ -518,7 +544,11 @@ export async function appraise(env, req) {
           price_per_oz: spot[m.metal], value: Math.round(value),
           basis: m.basis, as_of: spot.as_of, source: spot.source,
         };
-        if (value > price.low) {
+        // Only a weight the model actually established gets to move the price. A guessed weight is
+        // still shown to the dealer, but it must not silently become a floor.
+        melt.applied = m.confidence >= 0.7;
+        if (!melt.applied) warnings.push(`metal content is an estimate (confidence ${m.confidence}); shown but not used as a floor`);
+        if (melt.applied && value > price.low) {
           const was = `$${Math.round(price.low)}-${Math.round(price.high)}`;
           price.low = Math.round(value);
           price.high = Math.max(Math.round(price.high), Math.round(value * 1.2));
