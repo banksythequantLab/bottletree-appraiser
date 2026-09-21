@@ -415,6 +415,44 @@ export default {
         });
       }
 
+      // ---------- sellers (account-wide: the dealer's consignors, not one sale's) ----------
+      if (parts[1] === "me" && parts[2] === "sellers") {
+        if (parts.length === 3 && m === "GET")
+          return J((await db.prepare("SELECT id,name,created_at FROM sellers WHERE user_id=? ORDER BY name COLLATE NOCASE").bind(userId).all()).results);
+        if (parts.length === 3 && m === "POST") {
+          const b = await readJson(request); const name = (b.name || "").trim();
+          if (!name) return J({ error: "name required" }, 400);
+          const dup = await db.prepare("SELECT id,name FROM sellers WHERE user_id=? AND lower(trim(name))=lower(?)").bind(userId, name).first();
+          if (dup) return J(dup);   // idempotent: adding "Mom" twice gives you the same Mom
+          const id = uid();
+          await db.prepare("INSERT INTO sellers (id,user_id,name,created_at) VALUES (?,?,?,?)").bind(id, userId, name, now()).run();
+          return J({ id, name });
+        }
+        if (parts.length === 4) {
+          const sid2 = parts[3];
+          const own = await db.prepare("SELECT id FROM sellers WHERE id=? AND user_id=?").bind(sid2, userId).first();
+          if (!own) return J({ error: "not found" }, 404);
+          if (m === "PUT") {
+            const b = await readJson(request); const name = (b.name || "").trim();
+            if (!name) return J({ error: "name required" }, 400);
+            const clash = await db.prepare("SELECT id FROM sellers WHERE user_id=? AND lower(trim(name))=lower(?) AND id<>?").bind(userId, name, sid2).first();
+            if (clash) return J({ error: "You already have a seller by that name" }, 409);
+            await db.prepare("UPDATE sellers SET name=? WHERE id=?").bind(name, sid2).run();
+            return J({ id: sid2, name });
+          }
+          if (m === "DELETE") {
+            // Items keep their history; they just lose the attribution. Never delete a seller's items.
+            const n = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE seller_id=?").bind(sid2).first();
+            if (n.n && url.searchParams.get("force") !== "1")
+              return J({ error: "This seller is on items", items: n.n, needs_force: true }, 409);
+            await db.prepare("UPDATE items SET seller_id=NULL WHERE seller_id=?").bind(sid2).run();
+            await db.prepare("DELETE FROM sellers WHERE id=?").bind(sid2).run();
+            return J({ deleted: 1, unassigned: n.n });
+          }
+        }
+        return J({ error: "not found" }, 404);
+      }
+
       // ---------- device key (for the counter kiosk) ----------
       if (parts[1] === "me" && parts[2] === "device-key") {
         if (m === "GET") { const u = await db.prepare("SELECT device_key FROM users WHERE id=?").bind(userId).first(); return J({ device_key: u.device_key || null }); }
@@ -451,7 +489,7 @@ export default {
           const id = uid();
           await db.prepare("INSERT INTO sales (id,name,status,created_at,user_id) VALUES (?,?,'open',?,?)").bind(id, name, now(), userId).run();
           if (b.seller && b.seller.trim())
-            await db.prepare("INSERT INTO sellers (id,sale_id,name,created_at) VALUES (?,?,?,?)").bind(uid(), id, b.seller.trim(), now()).run();
+            await db.prepare("INSERT OR IGNORE INTO sellers (id,user_id,name,created_at) VALUES (?,?,?,?)").bind(uid(), userId, b.seller.trim(), now()).run();
           return J({ id, name });
         }
       }
@@ -460,7 +498,7 @@ export default {
         if (!(await ownsSale(sid))) return J({ error: "not found" }, 404);
         if (parts.length === 3 && m === "GET") {
           const sale = await db.prepare("SELECT * FROM sales WHERE id=?").bind(sid).first();
-          const sellers = (await db.prepare("SELECT * FROM sellers WHERE sale_id=? ORDER BY created_at").bind(sid).all()).results;
+          const sellers = (await db.prepare("SELECT id,name FROM sellers WHERE user_id=? ORDER BY name COLLATE NOCASE").bind(userId).all()).results;
           const items = (await db.prepare(
             "SELECT i.*, (SELECT r2_key FROM photos p WHERE p.item_id=i.id ORDER BY p.sort, p.created_at LIMIT 1) AS thumb_key, " +
             "(SELECT status FROM appraisals a WHERE a.item_id=i.id ORDER BY a.created_at DESC LIMIT 1) AS appraisal_status " +
@@ -481,15 +519,18 @@ export default {
           await db.prepare("DELETE FROM appraisals WHERE item_id IN (SELECT id FROM items WHERE sale_id=?)").bind(sid).run();
           await db.prepare("DELETE FROM items WHERE sale_id=?").bind(sid).run();
           await db.prepare("DELETE FROM txns WHERE sale_id=?").bind(sid).run();
-          await db.prepare("DELETE FROM sellers WHERE sale_id=?").bind(sid).run();
+          // Sellers are the dealer's, not the sale's — deleting a sale must not delete their consignors.
           const r = await db.prepare("DELETE FROM sales WHERE id=? AND user_id=?").bind(sid, userId).run();
           return J({ deleted: r.meta.changes, photos: ps.length });
         }
+        // Kept for older clients: adding a seller "to a sale" now adds them to the account.
         if (parts[3] === "sellers" && m === "POST") {
           const b = await readJson(request); const name = (b.name || "").trim();
           if (!name) return J({ error: "name required" }, 400);
+          const dup = await db.prepare("SELECT id,name FROM sellers WHERE user_id=? AND lower(trim(name))=lower(?)").bind(userId, name).first();
+          if (dup) return J(dup);
           const id = uid();
-          await db.prepare("INSERT INTO sellers (id,sale_id,name,created_at) VALUES (?,?,?,?)").bind(id, sid, name, now()).run();
+          await db.prepare("INSERT INTO sellers (id,user_id,name,created_at) VALUES (?,?,?,?)").bind(id, userId, name, now()).run();
           return J({ id, name });
         }
         if (parts[3] === "items" && m === "POST") {

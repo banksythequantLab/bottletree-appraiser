@@ -166,8 +166,24 @@ async function renderSales() {
       <div style="height:8px"></div>
       <button class="btn" id="newBtn">+ New sale</button>
     </div>
-    <div id="salesList" class="list"></div>`;
+    <div id="salesList" class="list"></div>
+    <div class="card" style="margin-top:14px">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <label style="margin:0">Your sellers</label>
+        <button class="btn sec sm" id="sellAdd" style="margin:0">+ Add</button>
+      </div>
+      <div class="muted" style="font-size:.8rem;margin-top:4px">Consignors and booth partners. They carry across every sale.</div>
+      <div id="sellList" style="margin-top:8px"></div>
+    </div>`;
   $("#newBtn").onclick = createSale;
+  $("#sellAdd").onclick = async () => {
+    const name = prompt("Seller name (e.g. Mom, Booth 12):");
+    if (!name || !name.trim()) return;
+    try { await api("/me/sellers", { method: "POST", body: JSON.stringify({ name: name.trim() }) }); }
+    catch (e) { return toast(e.message); }
+    toast("Seller added"); loadSellers();
+  };
+  loadSellers();
   $("#newName").addEventListener("keydown", e => { if (e.key === "Enter") createSale(); });
   $("#signout").onclick = e => { e.preventDefault(); logout(); };
   $("#myshop").onclick = e => { e.preventDefault(); renderShopSetup(renderSales); };
@@ -184,8 +200,40 @@ async function renderSales() {
   el.querySelectorAll("[data-del]").forEach(b => b.onclick = e => { e.stopPropagation(); deleteSale(b.dataset.del, b.dataset.name); });
   el.querySelectorAll(".li").forEach(li => li.onclick = () => openSale(li.dataset.id));
 }
+async function loadSellers() {
+  const el = $("#sellList"); if (!el) return;
+  let rows = [];
+  try { rows = await api("/me/sellers"); } catch { return; }
+  if (!rows.length) { el.innerHTML = `<div class="muted" style="font-size:.82rem">None yet — add the people whose things you sell.</div>`; return; }
+  el.innerHTML = rows.map(s => `<div class="row" style="justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--line)">
+      <span style="font-weight:700">${esc(s.name)}</span>
+      <span><a href="#" data-ren="${s.id}" data-n="${esc(s.name)}" class="muted" style="font-size:.8rem;font-weight:700;margin-right:12px">Rename</a>
+            <a href="#" data-del="${s.id}" data-n="${esc(s.name)}" class="muted" style="font-size:.8rem;font-weight:700">Remove</a></span>
+    </div>`).join("");
+  el.querySelectorAll("[data-ren]").forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    const name = prompt("Rename seller:", a.dataset.n);
+    if (!name || !name.trim() || name.trim() === a.dataset.n) return;
+    try { await api("/me/sellers/" + a.dataset.ren, { method: "PUT", body: JSON.stringify({ name: name.trim() }) }); }
+    catch (err) { return toast(err.message); }
+    toast("Renamed"); loadSellers();
+  });
+  el.querySelectorAll("[data-del]").forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    if (!confirm(`Remove ${a.dataset.n}?`)) return;
+    try { await api("/me/sellers/" + a.dataset.del, { method: "DELETE" }); }
+    catch (err) {
+      if (!/on items/i.test(err.message)) return toast(err.message);
+      // Their items stay; they just stop being attributed to anyone.
+      if (!confirm(`${a.dataset.n} is on items already.\n\nRemoving them keeps those items and their sales, but the items stop being attributed to anyone and drop out of the payout split.\n\nRemove anyway?`)) return;
+      try { await api("/me/sellers/" + a.dataset.del + "?force=1", { method: "DELETE" }); }
+      catch (e2) { return toast(e2.message); }
+    }
+    toast("Removed"); loadSellers();
+  });
+}
 async function deleteSale(id, name) {
-  if (!confirm(`Delete "${name}"?\n\nThis removes its items, photos and sellers for good.`)) return;
+  if (!confirm(`Delete "${name}"?\n\nThis removes its items and their photos for good. Your sellers are kept.`)) return;
   try {
     await api("/sales/" + id, { method: "DELETE" });
   } catch (e) {
