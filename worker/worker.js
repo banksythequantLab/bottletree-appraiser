@@ -539,9 +539,23 @@ export default {
           const price_cents = b.price === undefined || b.price === "" || b.price === null ? 0 : Math.round(Number(b.price) * 100);
           if (!Number.isFinite(price_cents) || price_cents < 0) return J({ error: "bad price" }, 400);
           const id = uid();
-          await db.prepare("INSERT INTO items (id,sale_id,seller_id,name,price_cents,status,created_at,description,markings) VALUES (?,?,?,?,?,'available',?,?,?)")
-            .bind(id, sid, b.seller_id || null, name, price_cents, now(), (b.description || "").trim() || null, (b.markings || "").trim() || null).run();
-          return J({ id });
+          // Next free tag number for this sale. MAX+1 rather than COUNT+1 so deleting an item never
+          // hands its number to a different thing — a reprinted tag must not change meaning.
+          const t = await db.prepare("SELECT COALESCE(MAX(tag_no),0)+1 AS n FROM items WHERE sale_id=?").bind(sid).first();
+          await db.prepare("INSERT INTO items (id,sale_id,seller_id,name,price_cents,status,created_at,description,markings,tag_no) VALUES (?,?,?,?,?,'available',?,?,?,?)")
+            .bind(id, sid, b.seller_id || null, name, price_cents, now(), (b.description || "").trim() || null, (b.markings || "").trim() || null, t.n).run();
+          return J({ id, tag_no: t.n });
+        }
+        // Scanner lookup: a tag number, or the full "BT-<sale8>-<tag>" payload we encode on the label.
+        if (parts[3] === "tag" && parts.length === 5 && m === "GET") {
+          const raw = decodeURIComponent(parts[4]);
+          const mm = /^(?:BT-[0-9a-f]{8}-)?0*(\d{1,6})$/i.exec(raw.trim());
+          if (!mm) return J({ error: "not a Bottle Tree tag" }, 400);
+          const it = await db.prepare(
+            "SELECT i.*, (SELECT r2_key FROM photos p WHERE p.item_id=i.id ORDER BY p.sort, p.created_at LIMIT 1) AS thumb_key " +
+            "FROM items i WHERE i.sale_id=? AND i.tag_no=?").bind(sid, Number(mm[1])).first();
+          if (!it) return J({ error: `No item ${mm[1]} in this sale` }, 404);
+          return J(it);
         }
         if (parts[3] === "checkout" && m === "POST") {
           const b = await readJson(request);

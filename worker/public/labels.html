@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Price labels — Estate Sale Road Show</title>
+<style>
+  :root { --ink:#241f1a; --sub:#6b6156; --line:#d9cfbe; --green:#1f5c3d; --bg:#f6f1e7; }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
+  .bar{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line);padding:12px 16px;z-index:5}
+  .bar h1{margin:0 0 8px;font-size:1.05rem}
+  .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  label.f{font-size:.82rem;font-weight:700;color:var(--sub)}
+  select,button{font:inherit;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:#fff}
+  button.go{background:var(--green);color:#fff;border-color:var(--green);font-weight:800;cursor:pointer}
+  .hint{font-size:.8rem;color:var(--sub);margin-top:8px}
+  #sheet{padding:16px}
+
+  /* Plain paper: cut-it-yourself grid. Generous tags, dashed guides. */
+  .sheet.plain{background:#fff;width:8.5in;min-height:11in;margin:0 auto;padding:.4in;
+    display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:1.3in;gap:0}
+  .sheet.plain .lab{border:1px dashed #bbb;padding:.08in .1in}
+
+  /* Avery 5160: 3 x 10 of 2.625in x 1in, .5in top margin, .1875in side, .125in column gutter. */
+  .sheet.avery{background:#fff;width:8.5in;height:11in;margin:0 auto;
+    padding:.5in .1875in 0;display:grid;grid-template-columns:repeat(3,2.625in);
+    grid-auto-rows:1in;column-gap:.125in;row-gap:0}
+  .sheet.avery .lab{padding:.06in .08in;overflow:hidden}
+
+  .lab{display:flex;gap:.08in;align-items:center;color:#000;background:#fff}
+  .lab .codes{display:flex;flex-direction:column;align-items:center;gap:2px;flex:0 0 auto}
+  .lab .codes img{display:block}
+  .lab .codes svg{display:block}
+  .lab .txt{flex:1 1 auto;min-width:0}
+  .lab .no{font-size:.62rem;font-weight:800;letter-spacing:.04em;color:#444}
+  .lab .nm{font-weight:700;font-size:.72rem;line-height:1.15;overflow:hidden;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .lab .pr{font-weight:900;font-size:1.05rem;margin-top:1px}
+  .sheet.plain .lab .nm{font-size:.82rem;-webkit-line-clamp:3}
+  .sheet.plain .lab .pr{font-size:1.3rem}
+
+  @media print {
+    .bar,#note{display:none !important}
+    body{background:#fff}
+    #sheet{padding:0}
+    .sheet{box-shadow:none !important;margin:0 !important}
+    .sheet.plain .lab{border-color:#ddd}
+    @page{size:letter;margin:0}
+  }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1 id="title">Price labels</h1>
+  <div class="row">
+    <span><label class="f" for="stock">Paper</label><br>
+      <select id="stock">
+        <option value="plain">Plain paper — cut with scissors</option>
+        <option value="avery">Avery 5160 — 30 stickers per sheet</option>
+      </select></span>
+    <span><label class="f" for="codes">Codes</label><br>
+      <select id="codes">
+        <option value="both">QR + barcode</option>
+        <option value="qr">QR only</option>
+        <option value="c128">Barcode only</option>
+        <option value="none">No codes — text tags</option>
+      </select></span>
+    <span><label class="f" for="which">Items</label><br>
+      <select id="which">
+        <option value="available">Unsold only</option>
+        <option value="all">Everything</option>
+      </select></span>
+    <span><br><button class="go" id="print">Print</button></span>
+  </div>
+  <div class="hint" id="note">Print at 100% scale with "Fit to page" OFF, or the labels will not line up.
+    Check one sheet against your labels before running the whole stack.</div>
+</div>
+<div id="sheet"></div>
+
+<script src="/labels.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const money = c => "$" + (c / 100).toFixed(2);
+const esc = s => (s || "").replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+const saleId = new URLSearchParams(location.search).get("sale");
+let sale = null, items = [];
+
+async function load() {
+  if (!saleId) { $("#sheet").innerHTML = "<p>No sale chosen.</p>"; return; }
+  const r = await fetch("/api/sales/" + saleId, { credentials: "same-origin" });
+  if (!r.ok) { $("#sheet").innerHTML = "<p>Couldn't load that sale. Are you signed in?</p>"; return; }
+  const d = await r.json();
+  sale = d.sale; items = d.items || [];
+  $("#title").textContent = "Price labels — " + sale.name;
+  document.title = "Labels — " + sale.name;
+  render();
+}
+
+async function render() {
+  const stock = $("#stock").value, codes = $("#codes").value, which = $("#which").value;
+  const rows = items.filter(i => which === "all" || i.status === "available")
+                    .filter(i => i.tag_no)
+                    .sort((a, b) => a.tag_no - b.tag_no);
+  if (!rows.length) { $("#sheet").innerHTML = "<p style='text-align:center'>Nothing to print yet — add some items first.</p>"; return; }
+
+  // Paginate ourselves. An Avery sheet that spills past 30 puts every label on page two off the
+  // die-cut, and there is no way to tell until you have wasted a sheet.
+  const perPage = stock === "avery" ? 30 : 21;
+  const qrPx = stock === "avery" ? 58 : 76;
+  const frag = document.createDocumentFragment();
+  let wrap = null;
+
+  for (let n = 0; n < rows.length; n++) {
+    const it = rows[n];
+    if (n % perPage === 0) {
+      wrap = document.createElement("div");
+      wrap.className = "sheet " + stock;
+      wrap.style.boxShadow = "0 2px 12px rgba(0,0,0,.12)";
+      if (n) wrap.style.pageBreakBefore = "always";
+      wrap.style.marginTop = n ? "18px" : "0";
+      frag.appendChild(wrap);
+    }
+    const code = BTLabels.payload(saleId, it.tag_no);
+    const lab = document.createElement("div");
+    lab.className = "lab";
+    const box = document.createElement("div");
+    box.className = "codes";
+    if (codes === "qr" || codes === "both") {
+      const img = new Image(); img.width = qrPx; img.height = qrPx;
+      img.src = await BTLabels.qrDataUrl(code, qrPx * 3);
+      box.appendChild(img);
+    }
+    if (codes === "c128" || codes === "both") {
+      box.appendChild(BTLabels.code128Svg(code, {
+        width: stock === "avery" ? 1 : 1.3,
+        height: stock === "avery" ? (codes === "both" ? 14 : 30) : (codes === "both" ? 20 : 40),
+      }));
+    }
+    if (codes !== "none") lab.appendChild(box);
+    const txt = document.createElement("div");
+    txt.className = "txt";
+    txt.innerHTML = `<div class="no">#${String(it.tag_no).padStart(3, "0")}</div>
+      <div class="nm">${esc(it.ai_title || it.name)}</div>
+      <div class="pr">${money(it.price_cents)}</div>`;
+    lab.appendChild(txt);
+    wrap.appendChild(lab);
+  }
+
+  $("#sheet").innerHTML = "";
+  $("#sheet").appendChild(frag);
+  $("#note").textContent = `${rows.length} label${rows.length === 1 ? "" : "s"} on ` +
+    `${Math.ceil(rows.length / perPage)} sheet${rows.length > perPage ? "s" : ""}. ` +
+    `Print at 100% scale with "Fit to page" OFF, or the labels will not line up. ` +
+    `Check one sheet against your labels before running the whole stack.`;
+}
+
+["stock", "codes", "which"].forEach(id => $("#" + id).onchange = render);
+$("#print").onclick = () => window.print();
+load();
+</script>
+</body>
+</html>

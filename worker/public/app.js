@@ -293,7 +293,11 @@ function renderItems() {
       <div style="height:6px"></div>
       <button class="btn sec sm" id="addSeller">+ Add a seller</button>
     </div>
-    <div class="row" style="justify-content:space-between;margin:6px 2px"><h3>Items (${avail.length} available)</h3></div>
+    <div class="row" style="justify-content:space-between;align-items:center;margin:6px 2px">
+      <h3 style="margin:0">Items (${avail.length} available)</h3>
+      <a href="/labels?sale=${encodeURIComponent(state.saleId)}" target="_blank" rel="noopener"
+         class="muted" style="font-size:.85rem;font-weight:800;color:var(--cobalt)">🏷️ Print labels</a>
+    </div>
     <div id="itemList" class="list"></div>`;
   // Photos on a manual add: a plain item is still an item you want a picture of, and the
   // storefront uses the first photo as its thumbnail.
@@ -324,7 +328,7 @@ function renderItems() {
     i.appraisal_status === "pending" ? `<span class="pill">appraising…</span>` : i.appraisal_status === "done" ? `<span class="pill">AI priced</span>` : "";
   el.innerHTML = d.items.map(i => `<div class="li ${i.status === "sold" ? "sold" : ""} tap" data-open="${i.id}">
       ${i.thumb_key ? `<img src="/p/${esc(i.thumb_key)}" alt="" style="width:44px;height:44px;object-fit:cover;border-radius:8px">` : ""}
-      <div><div class="nm">${esc(i.ai_title || i.name)}</div><div class="muted" style="font-size:.8rem">${i.status === "sold" ? "sold" : "available"}${i.seller_id ? " · " + esc(nameOf(i.seller_id) || "") : ""} ${badge(i)}</div></div>
+      <div><div class="nm">${i.tag_no ? `<span class="muted" style="font-weight:800">#${String(i.tag_no).padStart(3, "0")}</span> ` : ""}${esc(i.ai_title || i.name)}</div><div class="muted" style="font-size:.8rem">${i.status === "sold" ? "sold" : "available"}${i.seller_id ? " · " + esc(nameOf(i.seller_id) || "") : ""} ${badge(i)}</div></div>
       <span class="pr">${money(i.price_cents)}</span>
       ${i.status === "available" ? `<button class="btn rust sm" data-del="${i.id}" style="margin-left:8px">✕</button>` : ""}
     </div>`).join("");
@@ -626,13 +630,97 @@ async function addSeller() {
   toast("Seller added"); await loadDetail(); renderItems();
 }
 
+// ---------- tag scanning ----------
+// BarcodeDetector is native in Chrome/Android and reads QR and Code 128 alike. Safari has no such
+// thing, so there we say so plainly and lean on the number printed under the code. Typing "014" at a
+// card table beats a scanner that half-works.
+async function addByTag(raw) {
+  if (!raw) return;
+  let it;
+  try { it = await api("/sales/" + state.saleId + "/tag/" + encodeURIComponent(raw)); }
+  catch (e) { return toast(e.message); }
+  if (it.status !== "available") return toast(`#${it.tag_no} ${it.name} — already sold`);
+  if (state.cart.has(it.id)) return toast(`#${it.tag_no} is already in the sale`);
+  state.cart.add(it.id);
+  const t = $("#tagNo"); if (t) t.value = "";
+  renderCashier();
+  toast(`#${String(it.tag_no).padStart(3, "0")} ${it.ai_title || it.name} — ${money(it.price_cents)}`);
+}
+
+async function scanTag() {
+  if (!canUseCamera()) return toast("No camera here — type the number under the code");
+  if (!("BarcodeDetector" in window))
+    return toast("This browser can't scan (Safari doesn't support it) — type the number instead");
+  let det;
+  try { det = new BarcodeDetector({ formats: ["qr_code", "code_128"] }); }
+  catch { return toast("Scanning isn't available here — type the number instead"); }
+
+  let stream = null, stop = false;
+  const ov = document.createElement("div");
+  ov.style.cssText = "position:fixed;inset:0;z-index:9999;background:#000;display:flex;flex-direction:column";
+  ov.innerHTML = `
+    <div style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:12px 14px;color:#fff">
+      <button id="scX" style="background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:10px;padding:8px 14px;font:inherit;font-weight:700">Done</button>
+      <span style="font-weight:800;font-size:.95rem">Point at a price tag</span><span style="width:64px"></span>
+    </div>
+    <div style="flex:1 1 auto;position:relative;min-height:0">
+      <video id="scV" playsinline autoplay muted style="width:100%;height:100%;object-fit:cover;background:#000"></video>
+      <div style="position:absolute;inset:18% 12%;border:3px solid rgba(255,255,255,.75);border-radius:14px"></div>
+    </div>
+    <div id="scLog" style="flex:0 0 auto;color:#fff;text-align:center;padding:12px 14px 24px;font-size:.9rem;min-height:2.6em">Scanning…</div>`;
+  document.body.appendChild(ov);
+  const v = ov.querySelector("#scV"), log = ov.querySelector("#scLog");
+  const close = () => { stop = true; try { stream && stream.getTracks().forEach(t => t.stop()); } catch {} ov.remove(); renderCashier(); };
+  ov.querySelector("#scX").onclick = close;
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+    v.srcObject = stream; await v.play().catch(() => {});
+  } catch { log.textContent = "Couldn't open the camera."; return; }
+
+  // Keep scanning so a cashier can sweep a whole armful without reopening the camera each time.
+  const seen = new Map();
+  while (!stop) {
+    try {
+      const hits = await det.detect(v);
+      for (const h of hits) {
+        const val = (h.rawValue || "").trim();
+        if (!val) continue;
+        if (Date.now() - (seen.get(val) || 0) < 2500) continue;   // one beep per tag, not per frame
+        seen.set(val, Date.now());
+        try {
+          const it = await api("/sales/" + state.saleId + "/tag/" + encodeURIComponent(val));
+          if (it.status !== "available") { log.textContent = `#${it.tag_no} ${it.name} — already sold`; }
+          else if (state.cart.has(it.id)) { log.textContent = `#${it.tag_no} already added`; }
+          else {
+            state.cart.add(it.id);
+            log.textContent = `✓ #${String(it.tag_no).padStart(3, "0")} ${it.ai_title || it.name} — ${money(it.price_cents)}`;
+            updateCart();
+            if (navigator.vibrate) navigator.vibrate(60);
+          }
+        } catch (e) { log.textContent = e.message; }
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 220));
+  }
+}
+
 // Cashier tab: tap available items into cart, charge
 function cartTotal() { const d = state.detail; return d.items.filter(i => state.cart.has(i.id)).reduce((a, i) => a + i.price_cents, 0); }
 function renderCashier() {
   const d = state.detail;
   const avail = d.items.filter(i => i.status === "available");
-  app.innerHTML = `<div class="row" style="justify-content:space-between;margin:8px 2px"><h3>Tap items to sell</h3><span class="muted" style="font-size:.85rem">${avail.length} available</span></div>
+  app.innerHTML = `<div class="card" style="border-color:var(--cobalt)">
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn" id="scanGo" style="flex:1 1 60%">📷 Scan a tag</button>
+        <input id="tagNo" inputmode="numeric" placeholder="or type #" style="flex:1 1 30%;text-align:center">
+      </div>
+      <div class="muted" style="font-size:.8rem;margin-top:6px">Scan the QR or barcode on the price tag. No camera? Type the number under it.</div>
+    </div>
+    <div class="row" style="justify-content:space-between;margin:8px 2px"><h3>Tap items to sell</h3><span class="muted" style="font-size:.85rem">${avail.length} available</span></div>
     <div id="cashList" class="list"></div>`;
+  $("#scanGo").onclick = scanTag;
+  $("#tagNo").addEventListener("keydown", e => { if (e.key === "Enter") addByTag($("#tagNo").value.trim()); });
   const el = $("#cashList");
   if (!avail.length) { el.innerHTML = `<div class="empty"><div class="em">💵</div>Nothing available to sell. Add items first.</div>`; }
   else el.innerHTML = avail.map(i => `<div class="li tap ${state.cart.has(i.id) ? "selected" : ""}" data-id="${i.id}">
