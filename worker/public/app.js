@@ -5,6 +5,7 @@ const app = $("#app"), tabs = $("#tabs"), ctx = $("#ctx"), backBtn = $("#backBtn
 let state = { view: "sales", saleId: null, detail: null, tab: "items", cart: new Set() };
 let user = null;
 let billingInit = false;
+let pendingPhotos = [];   // photos staged on the manual "Add an item" card
 window.addEventListener("bt:plan", () => { if (state.view === "sales") renderSales(); });
 
 const money = c => "$" + (c / 100).toFixed(2);
@@ -233,12 +234,37 @@ function renderItems() {
       <div style="height:8px"></div>
       <select id="iSeller">${sellerOptions("")}</select>
       <div style="height:8px"></div>
+      <div class="row" style="gap:8px;align-items:center">
+        <button class="btn sec sm" id="iCam" style="display:none">📷 Photo</button>
+        <label class="btn sec sm" style="display:inline-block;margin:0">Choose photos<input type="file" accept="image/*" multiple hidden id="iFiles"></label>
+        <span class="muted" id="iCount" style="font-size:.82rem"></span>
+      </div>
+      <div id="iThumbs" class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px"></div>
+      <div style="height:8px"></div>
       <button class="btn" id="addItem">+ Add item</button>
       <div style="height:6px"></div>
       <button class="btn sec sm" id="addSeller">+ Add a seller</button>
     </div>
     <div class="row" style="justify-content:space-between;margin:6px 2px"><h3>Items (${avail.length} available)</h3></div>
     <div id="itemList" class="list"></div>`;
+  // Photos on a manual add: a plain item is still an item you want a picture of, and the
+  // storefront uses the first photo as its thumbnail.
+  pendingPhotos = [];
+  const drawThumbs = () => {
+    const t = $("#iThumbs"); if (!t) return;
+    t.innerHTML = pendingPhotos.map((f, n) =>
+      `<span style="position:relative;display:inline-block">
+         <img src="${URL.createObjectURL(f)}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:8px">
+         <button data-rm="${n}" title="Remove" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:0;background:var(--rust,#a33);color:#fff;font-size:.7rem;line-height:1;cursor:pointer">✕</button>
+       </span>`).join("");
+    t.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { pendingPhotos.splice(+b.dataset.rm, 1); drawThumbs(); });
+    $("#iCount").textContent = pendingPhotos.length ? `${pendingPhotos.length} photo${pendingPhotos.length === 1 ? "" : "s"}` : "";
+  };
+  $("#iFiles").onchange = e => { pendingPhotos.push(...e.target.files); e.target.value = ""; drawThumbs(); };
+  if (canUseCamera()) {
+    const ic = $("#iCam"); ic.style.display = "inline-block";
+    ic.onclick = async () => { const f = await openCamera("Photo of the item"); if (f) { pendingPhotos.push(f); drawThumbs(); } };
+  }
   $("#addItem").onclick = addItem;
   $("#aiAdd").onclick = () => renderCapture();
   $("#iPrice").addEventListener("keydown", e => { if (e.key === "Enter") addItem(); });
@@ -519,8 +545,25 @@ async function addItem() {
   const name = $("#iName").value.trim(), price = $("#iPrice").value.trim(), seller_id = $("#iSeller").value;
   if (!name) return toast("Item name?");
   if (price === "" || isNaN(Number(price))) return toast("Enter a price");
-  try { await api("/sales/" + state.saleId + "/items", { method: "POST", body: JSON.stringify({ name, price, seller_id }) }); }
-  catch (e) { return toast(e.message); }
+  const btn = $("#addItem"), photos = pendingPhotos.slice();
+  btn.disabled = true; if (photos.length) btn.textContent = "Uploading…";
+  let id;
+  try { ({ id } = await api("/sales/" + state.saleId + "/items", { method: "POST", body: JSON.stringify({ name, price, seller_id }) })); }
+  catch (e) { btn.disabled = false; btn.textContent = "+ Add item"; return toast(e.message); }
+  // The item exists now. A photo upload that fails must not lose it — say so and move on.
+  if (photos.length) {
+    try {
+      const fd = new FormData();
+      for (const f of photos) fd.append("photos", await shrink(f), f.name || "photo.jpg");
+      fd.append("kinds", photos.map(() => "other").join(","));
+      const up = await fetch("/api/items/" + id + "/photos", { method: "POST", body: fd, credentials: "same-origin" });
+      if (!up.ok) throw new Error((await up.json().catch(() => ({}))).error || "upload failed");
+    } catch (e) {
+      toast(`Item added, but the photos didn't upload (${e.message}) — open it to try again`);
+      pendingPhotos = []; await loadDetail(); return renderItems();
+    }
+  }
+  pendingPhotos = [];
   toast("Added"); await loadDetail(); renderItems(); $("#iName").focus();
 }
 async function addSeller() {
