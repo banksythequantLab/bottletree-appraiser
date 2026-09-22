@@ -309,6 +309,13 @@ function summarise(listings) {
 const ANTIQUE_DOMAINS = ["ebay.com", "liveauctioneers.com", "worthpoint.com", "1stdibs.com",
                          "chairish.com", "invaluable.com", "rubylane.com", "etsy.com"];
 
+// A search that is failing and a market with nothing in it are different facts, and for months
+// they produced the same sentence. The deployed Worker held a stale Tavily key: every call 401'd,
+// the catch below swallowed it, and every appraisal told the dealer "no live comparables found" —
+// which reads as "this item is obscure", not "the price you are looking at came from memory
+// because our search has been broken since launch". Record why it came back empty.
+let _searchFail = null;
+
 async function tavily(env, query, domains, limit) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 20000);
@@ -319,7 +326,13 @@ async function tavily(env, query, domains, limit) {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify(body), signal: ac.signal,
     });
-    if (!r.ok) return [];
+    if (!r.ok) {
+      _searchFail = r.status === 401 || r.status === 403
+        ? `the market-search key was rejected (${r.status})`
+        : r.status === 429 ? "the market-search quota is exhausted (429)"
+        : `market search returned ${r.status}`;
+      return [];
+    }
     const j = await r.json();
     return (j.results || []).map(h => {
       const title = String(h.title || "").slice(0, 160);
@@ -332,12 +345,17 @@ async function tavily(env, query, domains, limit) {
         note: content.slice(0, 240),
       };
     });
-  } catch { return []; }
+  } catch (e) {
+    _searchFail = e.name === "AbortError" ? "market search timed out" : `market search failed (${e.message})`;
+    return [];
+  }
   finally { clearTimeout(t); }
 }
 
 export async function searchComps(env, query, limit = 5) {
-  if (!env.TAVILY_API_KEY || !String(query || "").trim()) return [];
+  _searchFail = null;
+  if (!env.TAVILY_API_KEY) { _searchFail = "no market-search key is configured"; return []; }
+  if (!String(query || "").trim()) return [];
   // The word "antique" used to be welded onto every query. On a box of DDR4 server RAM that is
   // poison: it guarantees no hits, the price falls back to what the model remembers, and on
   // anything whose market has moved the answer is wildly wrong. Ask plainly first.
@@ -364,6 +382,9 @@ export async function searchComps(env, query, limit = 5) {
   // the honest outcome.
   return hits.filter(h => isListingPage(h) && !isNoise(h) && relevant(query, h.title));
 }
+
+// Why the last search came back empty, or null if it simply found nothing.
+export const searchFailure = () => _searchFail;
 
 // There is deliberately no web-search equivalent of summarise() here. It was built and measured
 // against ten real queries: it produced a range on one of them, and that one was wrong — three
@@ -824,10 +845,18 @@ export async function appraise(env, req) {
     // This is the dangerous state, not a footnote: with no comps the number is the model's
     // recollection of a market it last saw during training. Fine for a Victorian jug, ruinous
     // for anything whose price has moved — memory, tools, bullion, anything with a spot market.
-    warnings.push("NO LIVE COMPARABLES FOUND — this price is the model's best guess from memory, " +
-      "not today's market. Check it yourself before you sell, especially for electronics, metals " +
-      "or anything sold by the unit.");
-    price.basis = (price.basis + " No live comparables were found, so this is a memory-based estimate.").trim();
+    // Say which of the two things happened. "Nothing is listed" is a fact about the item;
+    // "our search is broken" is a fact about us, and the dealer is owed the difference.
+    const why = searchFailure();
+    warnings.push(why
+      ? `MARKET SEARCH IS NOT WORKING — ${why}. This price is the model's best guess from memory, ` +
+        `not today's market, and that is our fault rather than a quiet market. Do not rely on it.`
+      : "NO LIVE COMPARABLES FOUND — this price is the model's best guess from memory, " +
+        "not today's market. Check it yourself before you sell, especially for electronics, metals " +
+        "or anything sold by the unit.");
+    price.basis = (price.basis + (why
+      ? ` Market search was unavailable (${why}), so this is a memory-based estimate.`
+      : " No live comparables were found, so this is a memory-based estimate.")).trim();
   }
   // Everything above priced ONE piece. Multiply here, where it is arithmetic rather than opinion.
   // "$960 the box" and "$150 a stick" are different conversations and the dealer needs both.
