@@ -841,6 +841,16 @@ export async function appraise(env, req) {
       for (const cp of (second.comparables || []).slice(0, 4))
         if (cp && typeof cp === "object" && cp.title) comparables.push(pick(cp, COMP_KEYS));
     } catch (e) { warnings.push(`comps re-pricing failed: ${e.message}`); }
+    // Relevant listings with no numbers on them cannot correct anything. Search returns page
+    // descriptions, and a marketplace's description often names the item without ever quoting a
+    // price — so the re-pricer reads four genuinely comparable listings, finds nothing to price
+    // against, and keeps its own guess. Three production runs on a 256GB RDIMM kit all said as
+    // much in their own basis and all came in at a third of what the box actually sold for.
+    // The dealer sees "4 comparables" and reasonably assumes the price was checked against them.
+    if (!hits.some(h => h.price > 0))
+      warnings.push(`${hits.length} similar listing${hits.length === 1 ? " was" : "s were"} found but ` +
+        `none showed a price, so this estimate is still the model's own — the listings confirm what ` +
+        `the item is, not what it sells for.`);
   } else {
     // This is the dangerous state, not a footnote: with no comps the number is the model's
     // recollection of a market it last saw during training. Fine for a Victorian jug, ruinous
