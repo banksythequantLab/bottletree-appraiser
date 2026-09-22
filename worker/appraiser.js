@@ -509,6 +509,52 @@ function makerFromMarks(marks) {
   if (!m) return "";
   return m[1].split(/\s+/).map(w => w.startsWith("&") ? w : w.charAt(0) + w.slice(1).toLowerCase()).join(" ");
 }
+// ---------- lots ----------
+// Asked four times for the same 256GB kit of eight RDIMMs, the model answered $190-330, $20-50,
+// $200-500 and $100-200. Reading its own stated basis each time, the arithmetic is where it comes
+// apart: sometimes it prices one module, sometimes eight, and it reports both as "the price".
+// Multiplication is not a judgement call, so we take it away from the model and do it here.
+const CAP = { mb: 1 / 1024, gb: 1, tb: 1024 };
+const COUNT_RE = /(?:\b(?:lot|set|box|pack|qty|quantity|group)\s*(?:of\s*)?[:#]?\s*(\d{1,3})\b)|(?:\b(\d{1,3})\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count|ct)\b)/i;
+
+// A capacity stated as a total, divided by the capacity stated per piece: "256 gb total" against
+// markings reading "32gb" is eight modules, and the dealer never had to type the number 8.
+const TOTAL_WORD = /\btotal\b|\ball ?together\b|\bcombined\b|\bin all\b/;
+
+function capacity(text, wantTotal) {
+  // Scope "total" to its own clause. In "512gb total, 64gb per stick" the word belongs to the
+  // first figure only, and a plain character window either side would let it swallow the second.
+  let best = 0;
+  for (const clause of String(text || "").toLowerCase().split(/[,;|/\n]+/)) {
+    const isTotal = TOTAL_WORD.test(clause);
+    if (isTotal !== !!wantTotal) continue;
+    const re = /(\d+(?:\.\d+)?)\s*(mb|gb|tb)\b/g;
+    let m;
+    while ((m = re.exec(clause))) best = Math.max(best, parseFloat(m[1]) * CAP[m[2]]);
+  }
+  return best;
+}
+
+export function detectLot(description, markings) {
+  const both = `${description || ""} ${markings || ""}`;
+  const m = COUNT_RE.exec(both);
+  if (m) {
+    const n = Number(m[1] || m[2]);
+    if (n >= 2 && n <= 500) return { count: n, how: "the dealer stated the count" };
+  }
+  const total = capacity(description, true) || capacity(markings, true);
+  const unit = capacity(markings, false) || capacity(description, false);
+  if (total > 0 && unit > 0 && total > unit) {
+    const n = total / unit;
+    // Only a clean division is evidence. 250 over 32 is not seven and a bit modules, it is two
+    // numbers that have nothing to do with each other.
+    if (Number.isInteger(n) && n >= 2 && n <= 64) {
+      return { count: n, how: `${total}GB total divided by ${unit}GB per piece` };
+    }
+  }
+  return null;
+}
+
 function compsQuery(ident) {
   const out = [], seen = new Set();
   for (const chunk of [ident.maker, ident.name, ident.period]) {
@@ -687,7 +733,18 @@ export async function appraise(env, req) {
       `\nIf this item is precious metal, price it from THESE numbers. Do not use a remembered spot price.`
     : "";
 
-  const sheet = buildEvidenceSheet(req, findings) + spotSheet;
+  // Settle the lot question before the model sees anything, so every price in the pipeline —
+  // the first pass, the comps re-pricing — means the same thing: one piece. Comparables are
+  // per-piece listings anyway, so this is also the frame the evidence is already in.
+  const lotInfo = detectLot(req.description, req.markings);
+  const lotSheet = lotInfo
+    ? `\n\n## This is a lot of ${lotInfo.count}\nThe dealer's text describes ${lotInfo.count} identical ` +
+      `pieces (${lotInfo.how}). Price ONE PIECE in price_range, not the lot. Do NOT multiply by ` +
+      `${lotInfo.count} — that is done afterwards, outside your answer. Comparable listings are ` +
+      `per-piece prices, so compare like with like.`
+    : "";
+
+  const sheet = buildEvidenceSheet(req, findings) + spotSheet + lotSheet;
   const user = `${sheet}\n\n## Required output schema\n${IDENTIFY_SCHEMA}`;
   let first = await textJson(c, IDENTIFY_SYSTEM(currency), user);
   if (incomplete(first)) {
@@ -748,6 +805,9 @@ export async function appraise(env, req) {
   if (hits.length) {
     const repriceUser = `Item: ${JSON.stringify(ident)}\nCondition: ${listing.condition_grade}\n` +
       `Current price_range: ${JSON.stringify(price)}\n` +
+      (lotInfo ? `\nThis is a lot of ${lotInfo.count} identical pieces, and price_range is the price ` +
+        `of ONE PIECE. Keep it that way. The comparables below are per-piece listings, so they are ` +
+        `directly comparable. Do NOT multiply by ${lotInfo.count}.\n` : "") +
       (market ? `\nLIVE eBay asking prices right now: ${market.count} listed, ` +
         `$${market.low}-$${market.high}, median $${market.median}. These are ASKING prices, not sold ` +
         `prices, so they run high — but they are today's market, and your own estimate is a memory. ` +
@@ -769,13 +829,38 @@ export async function appraise(env, req) {
       "or anything sold by the unit.");
     price.basis = (price.basis + " No live comparables were found, so this is a memory-based estimate.").trim();
   }
-  // Per-unit price for a lot. "$960 the box" and "$150 a stick" are different conversations, and
-  // the second is the one that gets the money.
-  const lot = /(\d{1,3})\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count)\b/i.exec(
-    `${listing.title} ${req.description}`);
-  const n = lot ? Number(lot[1]) : 0;
-  if (n > 1 && price.suggested_retail > 0) {
-    price.basis = (price.basis + ` About $${Math.round(price.suggested_retail / n)} per unit across ${n}.`).trim();
+  // Everything above priced ONE piece. Multiply here, where it is arithmetic rather than opinion.
+  // "$960 the box" and "$150 a stick" are different conversations and the dealer needs both.
+  let lot = null;
+  if (lotInfo && price.high > 0) {
+    const n = lotInfo.count;
+    const unit = { low: price.low, high: price.high, retail: price.suggested_retail, floor: price.floor };
+    // If the model ignored the instruction and priced the whole lot anyway, multiplying would
+    // overstate by a factor of n. Per-piece comparables are the check: a unit price several times
+    // the dearest comparable is not a unit price. Better to leave it alone and say so than to
+    // silently multiply a number that already includes the multiplication.
+    const compPrices = hits.map(h => h.price).filter(p => p > 0);
+    const ceiling = compPrices.length ? Math.max(...compPrices) * 3 : Infinity;
+    if (unit.retail > ceiling) {
+      warnings.push(`this looks like a lot of ${n}, but the per-piece price came back at ` +
+        `$${Math.round(unit.retail)} against comparables topping out at $${Math.round(Math.max(...compPrices))} — ` +
+        `the model may have priced the whole lot, so it has been left as-is rather than multiplied. Check it.`);
+    } else {
+      price = {
+        low: Math.round(unit.low * n),
+        high: Math.round(unit.high * n),
+        suggested_retail: Math.round(unit.retail * n),
+        floor: Math.round(unit.floor * n),
+        currency,
+        basis: `$${Math.round(unit.retail)} per piece × ${n} = $${Math.round(unit.retail * n)} ` +
+               `(${lotInfo.how}). ${price.basis}`.trim(),
+      };
+      lot = {
+        count: n, how: lotInfo.how,
+        unit_low: Math.round(unit.low), unit_high: Math.round(unit.high),
+        unit_retail: Math.round(unit.retail),
+      };
+    }
   }
 
   // Melt floor, last, so the comps re-pricer cannot undo it. Scrap value is arithmetic, not opinion:
@@ -818,6 +903,7 @@ export async function appraise(env, req) {
 
   return {
     melt,
+    lot,
     market,
     live_listings: (live || []).slice(0, 6),
     item_id: req.item_id,
