@@ -216,11 +216,16 @@ const median = ps => {
 // One representative number for a hit. A title carrying a price is the most reliable thing on the
 // page — it is the listing's own headline. Failing that, the middle of the body's figures, which
 // survives one stray number far better than the first one does.
+// A WorthPoint page for a Griswold skillet yielded "$906,000". Whatever that figure is — an item
+// number, a page counter — it is not a skillet price, and a six-figure comp would wreck any
+// appraisal it touched. This tool prices estate sales and antique booths; above this, the dealer is
+// not relying on software. The title still goes through as evidence, just without a price attached.
+const MAX_COMP = 100000;
+
 export function hitPrice(title, content) {
   const t = pricesIn(title);
-  if (t.length) return median(t);
-  const c = pricesIn(content);
-  return c.length ? median(c) : null;
+  const p = t.length ? median(t) : (pricesIn(content).length ? median(pricesIn(content)) : null);
+  return p !== null && p <= MAX_COMP ? p : null;
 }
 
 const firstPrice = t => { const m = PRICE_RE.exec(t || ""); if (!m) return null; const v = parseFloat(m[1].replace(/,/g, "")); return Number.isFinite(v) ? v : null; };
@@ -357,7 +362,7 @@ export async function searchComps(env, query, limit = 5) {
   // evidence — WorthPoint's "What's it Worth?" landing page carried a $41,418 figure into a Singer
   // Featherweight appraisal. If this empties the list, the no-comparables warning fires, which is
   // the honest outcome.
-  return hits.filter(h => isListingPage(h) && !isNoise(h));
+  return hits.filter(h => isListingPage(h) && !isNoise(h) && relevant(query, h.title));
 }
 
 // There is deliberately no web-search equivalent of summarise() here. It was built and measured
@@ -393,6 +398,26 @@ function isListingPage(h) {
   // results page is kept on purpose — its title describes the item even when no price survives
   // into the snippet, and that is still useful evidence for the re-pricer.
   return path.replace(/\/+$/, "").length >= 8;
+}
+
+// A comp for a DIFFERENT thing is worse than no comp at all. A page titled "Micron Memory RAM",
+// priced at $29.09, was the sole comparable for a 256GB kit of SK Hynix 32GB DDR4 ECC RDIMMs; the
+// model multiplied it by eight and produced $230 for a box that sold for $960. The title shares
+// none of what makes the query specific — not 32gb, not ddr4, not ecc, not rdimm.
+const REL_STOP = new Set(["for", "sale", "price", "sold", "with", "and", "the", "of", "in", "a", "an",
+                          "new", "used", "free", "shipping", "lot", "set", "item", "by", "at", "from"]);
+const relTokens = s => new Set(String(s || "").toLowerCase().match(/[a-z0-9]+/g)?.filter(
+  w => w.length >= 2 && !REL_STOP.has(w)) || []);
+
+function relevant(query, title) {
+  const q = relTokens(query);
+  if (!q.size) return true;
+  const t = relTokens(title);
+  let shared = 0, sharedSpecific = 0;
+  for (const w of q) if (t.has(w)) { shared++; if (/\d/.test(w)) sharedSpecific++; }
+  // A model number, capacity or year carries far more weight than a shared common noun: "memory"
+  // matches half the catalogue, "32gb" matches the part.
+  return shared / q.size >= 0.34 || (sharedSpecific >= 1 && shared / q.size >= 0.2);
 }
 
 function isNoise(h) {
