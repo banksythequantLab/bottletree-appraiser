@@ -539,9 +539,13 @@ export default {
           const price_cents = b.price === undefined || b.price === "" || b.price === null ? 0 : Math.round(Number(b.price) * 100);
           if (!Number.isFinite(price_cents) || price_cents < 0) return J({ error: "bad price" }, 400);
           const id = uid();
-          // Next free tag number for this sale. MAX+1 rather than COUNT+1 so deleting an item never
-          // hands its number to a different thing — a reprinted tag must not change meaning.
-          const t = await db.prepare("SELECT COALESCE(MAX(tag_no),0)+1 AS n FROM items WHERE sale_id=?").bind(sid).first();
+          // Next free tag number, taken from a counter on the sale rather than from MAX over the
+          // items still present. A label is a physical object stuck to a physical thing: once #3 is
+          // printed and taped to a table, #3 must never come to mean anything else, and MAX+1 hands
+          // it straight to the next item as soon as the old #3 is deleted. RETURNING keeps the
+          // increment and the read in one statement, so two people adding items at once cannot be
+          // handed the same number.
+          const t = await db.prepare("UPDATE sales SET next_tag = next_tag + 1 WHERE id=? RETURNING next_tag AS n").bind(sid).first();
           await db.prepare("INSERT INTO items (id,sale_id,seller_id,name,price_cents,status,created_at,description,markings,tag_no) VALUES (?,?,?,?,?,'available',?,?,?,?)")
             .bind(id, sid, b.seller_id || null, name, price_cents, now(), (b.description || "").trim() || null, (b.markings || "").trim() || null, t.n).run();
           return J({ id, tag_no: t.n });
@@ -549,12 +553,18 @@ export default {
         // Scanner lookup: a tag number, or the full "BT-<sale8>-<tag>" payload we encode on the label.
         if (parts[3] === "tag" && parts.length === 5 && m === "GET") {
           const raw = decodeURIComponent(parts[4]);
-          const mm = /^(?:BT-[0-9a-f]{8}-)?0*(\d{1,6})$/i.exec(raw.trim());
+          const mm = /^(?:BT-([0-9a-f]{8})-)?0*(\d{1,6})$/i.exec(raw.trim());
           if (!mm) return J({ error: "not one of this sale's tags" }, 400);
+          // The label encodes which sale it belongs to, and that has to be checked. Without this,
+          // a tag printed for last weekend's sale scans cleanly against today's and rings up
+          // whatever happens to share its number — wrong item, wrong price, no warning. Anyone
+          // running two sales, or a multi-family sale, hits this.
+          if (mm[1] && mm[1].toLowerCase() !== sid.slice(0, 8).toLowerCase())
+            return J({ error: "That tag was printed for a different sale" }, 400);
           const it = await db.prepare(
             "SELECT i.*, (SELECT r2_key FROM photos p WHERE p.item_id=i.id ORDER BY p.sort, p.created_at LIMIT 1) AS thumb_key " +
-            "FROM items i WHERE i.sale_id=? AND i.tag_no=?").bind(sid, Number(mm[1])).first();
-          if (!it) return J({ error: `No item ${mm[1]} in this sale` }, 404);
+            "FROM items i WHERE i.sale_id=? AND i.tag_no=?").bind(sid, Number(mm[2])).first();
+          if (!it) return J({ error: `No item ${Number(mm[2])} in this sale` }, 404);
           return J(it);
         }
         if (parts[3] === "checkout" && m === "POST") {
