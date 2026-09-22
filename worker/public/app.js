@@ -518,6 +518,12 @@ async function renderItemDetail(id) {
         <div class="kpi"><div class="n">$${Math.round(pr.low)}–$${Math.round(pr.high)}</div><div class="l">Price range</div></div>
         <div class="kpi"><div class="n">$${Math.round(pr.suggested_retail)}</div><div class="l">Suggested · floor $${Math.round(pr.floor)}</div></div>
       </div>
+      ${r.market ? `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--cobalt);background:var(--bg);font-size:.82rem">
+          <b>${r.market.count} listed on eBay right now</b> — $${r.market.low}–$${r.market.high}, median <b>$${r.market.median}</b>
+          <div class="muted" style="margin-top:3px">Asking prices, not sold prices, so they run high. Checked ${esc(String(r.market.as_of).slice(0, 10))}.</div>
+          ${(r.live_listings || []).length ? `<div style="margin-top:5px">${r.live_listings.map(l =>
+            `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><a href="${esc(l.url)}" target="_blank" rel="noopener" style="color:var(--cobalt)">$${Math.round(l.price)}${l.condition ? ` · ${esc(l.condition)}` : ""} — ${esc(l.title)}</a></div>`).join("")}</div>` : ""}
+        </div>` : ""}
       ${r.melt ? `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--green);background:var(--bg);font-size:.82rem">
           <b>Metal content:</b> ${r.melt.fine_troy_oz} ozt ${esc(r.melt.metal)} × $${r.melt.price_per_oz.toFixed(2)}/ozt = <b>$${r.melt.value} melt</b>
           <div class="muted" style="margin-top:3px">${esc(r.melt.basis)}</div>

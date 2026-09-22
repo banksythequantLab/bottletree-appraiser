@@ -179,6 +179,81 @@ async function textJson(c, system, user, maxTokens = 1800) {
 const PRICE_RE = /\$\s?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)/;
 const firstPrice = t => { const m = PRICE_RE.exec(t || ""); if (!m) return null; const v = parseFloat(m[1].replace(/,/g, "")); return Number.isFinite(v) ? v : null; };
 
+// ---------- eBay Browse: what the thing is listed at right now ----------
+// eBay put SOLD listings behind a login wall in Aug 2026, and Marketplace Insights (the official
+// sold-price API) has been closed to new applicants for years. Active listings are free, open and
+// permitted — and asking prices are enough to catch the failure that actually costs money, which is
+// not "off by 20%" but "off by 5x because there was no market data at all".
+// We report these as what they are: currently listed, not sold.
+let _ebayTok = { at: 0, token: null };
+
+async function ebayToken(env) {
+  if (_ebayTok.token && Date.now() - _ebayTok.at < 6600e3) return _ebayTok.token;   // 7200s life, refresh early
+  const basic = btoa(`${env.EBAY_CLIENT_ID}:${env.EBAY_CLIENT_SECRET}`);
+  const r = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${basic}` },
+    body: "grant_type=client_credentials&scope=" + encodeURIComponent("https://api.ebay.com/oauth/api_scope"),
+  });
+  if (!r.ok) throw new Error(`ebay auth ${r.status}`);
+  const j = await r.json();
+  if (!j.access_token) throw new Error("ebay auth: no token");
+  _ebayTok = { at: Date.now(), token: j.access_token };
+  return j.access_token;
+}
+
+async function ebayActive(env, query, limit = 12) {
+  if (!env.EBAY_CLIENT_ID || !env.EBAY_CLIENT_SECRET) return null;
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 12000);
+  try {
+    const tok = await ebayToken(env);
+    const u = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
+    u.searchParams.set("q", String(query).slice(0, 120));
+    u.searchParams.set("limit", String(limit));
+    // Fixed price only: an auction at $0.99 with three days left is not a price signal.
+    u.searchParams.set("filter", "buyingOptions:{FIXED_PRICE}");
+    const r = await fetch(u, {
+      headers: {
+        authorization: `Bearer ${tok}`,
+        "X-EBAY-C-MARKETPLACE-ID": env.EBAY_MARKETPLACE || "EBAY_US",
+        "content-type": "application/json",
+      },
+      signal: ac.signal,
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j.itemSummaries || []).map(i => ({
+      title: String(i.title || "").slice(0, 160),
+      url: i.itemWebUrl || "",
+      source: "ebay.com",
+      price: Number(i.price?.value) || null,
+      currency: i.price?.currency || "USD",
+      condition: i.condition || "",
+      note: `Listed now on eBay${i.condition ? ` — ${i.condition}` : ""}`,
+      live: true,
+    })).filter(x => x.price > 0);
+  } catch { return null; }
+  finally { clearTimeout(t); }
+}
+
+// A handful of asking prices, summarised the way a dealer would say it out loud:
+// "three listed right now, $150 to $189". The median is the honest middle; the count is the caveat.
+function summarise(listings) {
+  const ps = listings.map(l => l.price).filter(p => p > 0).sort((a, b) => a - b);
+  if (!ps.length) return null;
+  const mid = ps.length % 2 ? ps[(ps.length - 1) / 2] : (ps[ps.length / 2 - 1] + ps[ps.length / 2]) / 2;
+  return {
+    count: ps.length,
+    low: Math.round(ps[0]),
+    high: Math.round(ps[ps.length - 1]),
+    median: Math.round(mid),
+    currency: listings[0].currency || "USD",
+    source: "eBay active listings",
+    as_of: new Date().toISOString(),
+  };
+}
+
 // Antique marketplaces first, because that is the common case and they carry sold prices.
 const ANTIQUE_DOMAINS = ["ebay.com", "liveauctioneers.com", "worthpoint.com", "1stdibs.com",
                          "chairish.com", "invaluable.com", "rubylane.com", "etsy.com"];
@@ -545,10 +620,20 @@ export async function appraise(env, req) {
   price.basis = cleanedBasis.length ? cleanedBasis[0] : price.basis;
 
   const comparables = [];
-  const hits = await searchComps(env, compsQuery({ ...ident, name: searchName }));
+  const q = compsQuery({ ...ident, name: searchName });
+  // eBay first: it is the only live, free, permitted price feed we have. Tavily backfills the
+  // categories eBay is thin on, and covers us entirely when no eBay keys are configured.
+  const live = await ebayActive(env, q);
+  const market = live && live.length ? summarise(live) : null;
+  const hits = [...(live || []), ...(live && live.length >= 3 ? [] : await searchComps(env, q))];
   if (hits.length) {
     const repriceUser = `Item: ${JSON.stringify(ident)}\nCondition: ${listing.condition_grade}\n` +
-      `Current price_range: ${JSON.stringify(price)}\n\nComparables:\n${JSON.stringify(hits, null, 1)}`;
+      `Current price_range: ${JSON.stringify(price)}\n` +
+      (market ? `\nLIVE eBay asking prices right now: ${market.count} listed, ` +
+        `$${market.low}-$${market.high}, median $${market.median}. These are ASKING prices, not sold ` +
+        `prices, so they run high — but they are today's market, and your own estimate is a memory. ` +
+        `If your range sits well below these, raise it.\n` : "") +
+      `\nComparables:\n${JSON.stringify(hits, null, 1)}`;
     try {
       const second = await textJson(c, REPRICE_SYSTEM, repriceUser, 1000);
       if (second.price_range) price = priceOf(second.price_range, currency);
@@ -606,8 +691,16 @@ export async function appraise(env, req) {
     warnings.push("live metal prices unavailable; no melt floor applied");
   }
 
+  // A statement of fact the dealer can check, rather than an opinion they have to trust.
+  if (market) {
+    price.basis = (price.basis + ` ${market.count} listed on eBay right now at ` +
+      `$${market.low}-$${market.high} (median $${market.median}) — asking prices, not sold.`).trim();
+  }
+
   return {
     melt,
+    market,
+    live_listings: (live || []).slice(0, 6),
     item_id: req.item_id,
     identification: ident,
     confidence: clamp(first.confidence ?? 0.5),
