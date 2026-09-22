@@ -548,8 +548,20 @@ export default {
           const ids = Array.isArray(b.item_ids) ? b.item_ids.filter(Boolean) : [];
           if (!ids.length) return J({ error: "no items" }, 400);
           const ph = ids.map(() => "?").join(",");
-          const rows = (await db.prepare(`SELECT id,price_cents FROM items WHERE sale_id=? AND status='available' AND id IN (${ph})`).bind(sid, ...ids).all()).results;
+          const rows = (await db.prepare(`SELECT id,name,price_cents FROM items WHERE sale_id=? AND status='available' AND id IN (${ph})`).bind(sid, ...ids).all()).results;
           if (!rows.length) return J({ error: "items unavailable" }, 400);
+          // An item created before it was priced would otherwise ring up free and be marked sold,
+          // with nothing on screen to say so. Giving something away is a real thing at a sale, so
+          // it stays possible — but only on purpose.
+          const unpriced = rows.filter(r => r.price_cents <= 0);
+          if (unpriced.length && b.allow_free !== true)
+            return J({
+              error: unpriced.length === 1
+                ? `${unpriced[0].name} has no price`
+                : `${unpriced.length} items have no price`,
+              unpriced: unpriced.map(r => ({ id: r.id, name: r.name })),
+              needs_price: true,
+            }, 409);
           const total = rows.reduce((a, r) => a + r.price_cents, 0);
           const txnId = uid();
           await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)").bind(txnId, sid, total, rows.length, (b.tender || "cash"), now()).run();

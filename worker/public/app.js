@@ -16,7 +16,13 @@ async function api(path, opts) {
   if (!r.ok) {
     let e = {}; try { e = await r.json(); } catch {}
     if (r.status === 402 && e.paywall && window.BTBilling) { BTBilling.refresh().then(() => BTBilling.open("You're out of estimates. Your items and photos are saved.")); }
-    throw new Error(e.error || ("HTTP " + r.status));
+    // Carry the whole error body, not just its message. Callers that can actually resolve a
+    // failure need the detail — which items have no price, what needs confirming — and throwing
+    // a bare string turns every one of those into an unexplained red toast.
+    const err = new Error(e.error || ("HTTP " + r.status));
+    Object.assign(err, e);
+    err.status = r.status;
+    throw err;
   }
   return r.json();
 }
@@ -654,9 +660,31 @@ function updateCart() { $("#cartTot").textContent = money(cartTotal()); $("#cart
 async function charge() {
   if (!state.cart.size) return;
   const ids = [...state.cart];
-  try { const r = await api("/sales/" + state.saleId + "/checkout", { method: "POST", body: JSON.stringify({ item_ids: ids }) });
-    toast("Sold — " + money(r.total_cents) + " (cash)"); state.cart = new Set(); await loadDetail(); renderCashier(); }
-  catch (e) { toast(e.message); }
+  await ring(ids, false);
+}
+
+// Split out so the unpriced case can ring the same sale again once the dealer has said yes.
+// A cashier with a queue in front of them needs one tap to resolve this, not a trip to the item.
+async function ring(ids, allowFree) {
+  try {
+    const r = await api("/sales/" + state.saleId + "/checkout", {
+      method: "POST",
+      body: JSON.stringify(allowFree ? { item_ids: ids, allow_free: true } : { item_ids: ids }),
+    });
+    toast("Sold — " + money(r.total_cents) + " (cash)");
+    state.cart = new Set();
+    await loadDetail();
+    renderCashier();
+  } catch (e) {
+    if (e.needs_price) {
+      const names = (e.unpriced || []).map(u => u.name).join(", ");
+      if (confirm(`${names} has no price.\n\nPrice it first, or tap OK to give it away for $0.`)) {
+        await ring(ids, true);
+      }
+      return;
+    }
+    toast(e.message);
+  }
 }
 
 // Summary tab
