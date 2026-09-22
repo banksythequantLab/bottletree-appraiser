@@ -177,6 +177,52 @@ async function textJson(c, system, user, maxTokens = 1800) {
 
 // ---------- comps (comps.py) ----------
 const PRICE_RE = /\$\s?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)/;
+const PRICE_ALL_RE = /(?:US\s*)?\$\s?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)/g;
+
+// Taking the FIRST dollar figure in a search snippet is how "+$5.99 shipping" became the comp.
+// Marketplace snippets are littered with figures that are not the item's price: postage, "Save $10",
+// a struck-through was-price, financing.
+// Position matters, so these are two separate tests rather than one window. A wide lookback throws
+// away real prices: "Free shipping. SK Hynix 32GB DDR4 ECC RDIMM $159.99" is a perfectly good comp,
+// and a 40-character sweep backwards would kill it on the word "shipping". What actually disqualifies
+// a figure is a word sitting immediately against it — "Save $10", "$5.99 shipping".
+const BEFORE_NOT_PRICE = /\b(save|saving|was|orig(?:inal(?:ly)?)?|list price|retail price|msrp|reduced (?:to|from)?|discount(?:ed)?(?: by)?|coupon|rebate|off)\b[\s:–—-]*$/i;
+// The financing alternatives sit outside the \b group on purpose: "$79/mo" has no word boundary
+// between the digit and the slash, so an anchored \b would never fire.
+const AFTER_NOT_PRICE = /^[^$]{0,14}?(?:\b(?:shipping|postage|delivery|freight|s&h|off|per month|monthly|cash ?back|credit|in savings)\b|\/ ?mo(?:nth)?\b)/i;
+
+export function pricesIn(text) {
+  const s = String(text || "");
+  const out = [];
+  let m;
+  PRICE_ALL_RE.lastIndex = 0;
+  while ((m = PRICE_ALL_RE.exec(s))) {
+    const before = s.slice(Math.max(0, m.index - 18), m.index);
+    const after = s.slice(m.index + m[0].length, m.index + m[0].length + 20);
+    if (BEFORE_NOT_PRICE.test(before) || AFTER_NOT_PRICE.test(after)) continue;
+    const v = parseFloat(m[1].replace(/,/g, ""));
+    // Under a dollar is a fee or a fragment; over a million is a typo or a market-cap sentence.
+    if (Number.isFinite(v) && v >= 1 && v <= 1e6) out.push(v);
+  }
+  return out;
+}
+
+const median = ps => {
+  const s = [...ps].sort((a, b) => a - b);
+  if (!s.length) return null;
+  return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+};
+
+// One representative number for a hit. A title carrying a price is the most reliable thing on the
+// page — it is the listing's own headline. Failing that, the middle of the body's figures, which
+// survives one stray number far better than the first one does.
+export function hitPrice(title, content) {
+  const t = pricesIn(title);
+  if (t.length) return median(t);
+  const c = pricesIn(content);
+  return c.length ? median(c) : null;
+}
+
 const firstPrice = t => { const m = PRICE_RE.exec(t || ""); if (!m) return null; const v = parseFloat(m[1].replace(/,/g, "")); return Number.isFinite(v) ? v : null; };
 
 // ---------- eBay Browse: what the thing is listed at right now ----------
@@ -270,18 +316,22 @@ async function tavily(env, query, domains, limit) {
     });
     if (!r.ok) return [];
     const j = await r.json();
-    return (j.results || []).map(h => ({
-      title: String(h.title || "").slice(0, 160),
-      url: h.url || "",
-      source: String(h.url || "").includes("//") ? String(h.url).split("/")[2] : "",
-      price: firstPrice(h.content || ""),
-      note: String(h.content || "").slice(0, 240),
-    }));
+    return (j.results || []).map(h => {
+      const title = String(h.title || "").slice(0, 160);
+      const content = String(h.content || "");
+      return {
+        title,
+        url: h.url || "",
+        source: String(h.url || "").includes("//") ? String(h.url).split("/")[2] : "",
+        price: hitPrice(title, content),
+        note: content.slice(0, 240),
+      };
+    });
   } catch { return []; }
   finally { clearTimeout(t); }
 }
 
-async function searchComps(env, query, limit = 5) {
+export async function searchComps(env, query, limit = 5) {
   if (!env.TAVILY_API_KEY || !String(query || "").trim()) return [];
   // The word "antique" used to be welded onto every query. On a box of DDR4 server RAM that is
   // poison: it guarantees no hits, the price falls back to what the model remembers, and on
@@ -295,14 +345,56 @@ async function searchComps(env, query, limit = 5) {
     const seen = new Set(hits.map(h => h.url));
     hits = [...hits, ...wide.filter(h => !seen.has(h.url) && !isNoise(h))].slice(0, limit + 3);
   }
-  return hits;
+  // Still thin. Ask eBay directly and in eBay's own words — "for sale" phrasing hits listing pages,
+  // where the price is in the title, rather than the guide and blog pages a generic query returns.
+  // Costs one more search and only runs when we would otherwise be pricing from memory.
+  if (priced(hits) < 3) {
+    const bay = await tavily(env, `${query} for sale`, ["ebay.com"], limit);
+    const seen = new Set(hits.map(h => h.url));
+    hits = [...hits, ...bay.filter(h => !seen.has(h.url))].slice(0, limit + 6);
+  }
+  // Front doors and career pages are not comparables. They were being handed to the re-pricer as
+  // evidence — WorthPoint's "What's it Worth?" landing page carried a $41,418 figure into a Singer
+  // Featherweight appraisal. If this empties the list, the no-comparables warning fires, which is
+  // the honest outcome.
+  return hits.filter(h => isListingPage(h) && !isNoise(h));
 }
+
+// There is deliberately no web-search equivalent of summarise() here. It was built and measured
+// against ten real queries: it produced a range on one of them, and that one was wrong — three
+// copies of the same eBay search page, reporting $8 for a vintage red Fiesta dinner plate that
+// sells for $30-60. Tavily returns page descriptions, not listing grids, so the prices that reach
+// us are sparse and usually belong to the cheapest thing on a category page. A quiet, confident,
+// low number is the single most expensive failure this tool can produce for a dealer. Search hits
+// stay what they are — titles and the occasional price, handed to the re-pricer as context — and
+// the market card waits for the Browse API, which returns actual per-listing prices.
 
 // An open-web search turns up news and finance pages whose dollar figures are not prices — a CNBC
 // piece on chip demand came back as a "$3 comp". Feeding those to the re-pricer is worse than
 // finding nothing, because they look like evidence.
-const NOISE_HOST = /(^|\.)(cnbc|reuters|bloomberg|investing|finance\.yahoo|marketwatch|forbes|wsj|ft|barrons|seekingalpha|fool|benzinga|rocketreach|zoominfo|linkedin|wikipedia|glassdoor)\./i;
+// The place names in antique descriptions drag in maps and directories — "Red Wing 5 gallon crock"
+// returned a MapQuest page for Red Wing, Minnesota.
+const NOISE_HOST = /(^|\.)(cnbc|reuters|bloomberg|investing|finance\.yahoo|marketwatch|forbes|wsj|ft|barrons|seekingalpha|fool|benzinga|rocketreach|zoominfo|linkedin|wikipedia|glassdoor|mapquest|yelp|tripadvisor|indeed|ziprecruiter|facebook|instagram|pinterest|maps\.google)\./i;
 const NOISE_WORD = /\b(shares?|stock|earnings|quarterly|revenue|billion|acquisition|merger|ipo|analyst|forecast|benchmark|salary|net worth)\b/i;
+// Search engines happily return a marketplace's front door. "Invaluable.com: The World's Premier
+// Online Auctions" and WorthPoint's "What's it Worth?" are not listings, but they carry dollar
+// figures — a WorthPoint landing page handed us $41,418 for a Singer Featherweight. A real listing
+// lives at a deep path; a front door does not.
+const NOT_LISTING_HOST = /^(careers|community|help|support|pages|blog|about|www\.help)\./i;
+const NOT_LISTING_TITLE = /^(home|sign in|shop|my ebay)\b|world's premier|what's it worth|the art of vintage|\| ebay us$|ebay community/i;
+
+function isListingPage(h) {
+  const url = String(h.url || "");
+  const host = String(h.source || "");
+  if (NOT_LISTING_HOST.test(host)) return false;
+  if (NOT_LISTING_TITLE.test(String(h.title || ""))) return false;
+  const path = url.replace(/^https?:\/\/[^/]+/i, "").split(/[?#]/)[0];
+  // "/itm/226503187440" and "/sch/i.html" clear this; "/", "/us" and "/b/ram" do not. A search
+  // results page is kept on purpose — its title describes the item even when no price survives
+  // into the snippet, and that is still useful evidence for the re-pricer.
+  return path.replace(/\/+$/, "").length >= 8;
+}
+
 function isNoise(h) {
   const host = String(h.source || "");
   if (NOISE_HOST.test(host)) return true;
@@ -624,8 +716,10 @@ export async function appraise(env, req) {
   // eBay first: it is the only live, free, permitted price feed we have. Tavily backfills the
   // categories eBay is thin on, and covers us entirely when no eBay keys are configured.
   const live = await ebayActive(env, q);
-  const market = live && live.length ? summarise(live) : null;
   const hits = [...(live || []), ...(live && live.length >= 3 ? [] : await searchComps(env, q))];
+  // Only the Browse API produces a market range. See the note above searchComps for why search
+  // hits do not get one.
+  const market = (live && live.length) ? summarise(live) : null;
   if (hits.length) {
     const repriceUser = `Item: ${JSON.stringify(ident)}\nCondition: ${listing.condition_grade}\n` +
       `Current price_range: ${JSON.stringify(price)}\n` +
