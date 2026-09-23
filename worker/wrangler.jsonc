@@ -39,7 +39,10 @@
     "GOOGLE_CLIENT_ID": "751660268260-k999i5tdfr36um4c7uatbu11is4djh9g.apps.googleusercontent.com",
     // RevenueCat Web Purchase Link. The paywall appends /<user_id>; the RevenueCat webhook credits
     // that same id, so a web purchase and a Play purchase land in one ledger.
-    "RC_WEB_LINK": "https://pay.rev.cat/ukvqowwbpdfmdjjz"
+    "RC_WEB_LINK": "https://pay.rev.cat/ukvqowwbpdfmdjjz",
+    // eBay hashes this exact string into the challenge response, so it must match what is
+    // registered with eBay character for character — no trailing slash, no http.
+    "EBAY_DELETION_URL": "https://bottletree-app.dj-b02.workers.dev/api/ebay/deletion"
   }
   // Secrets (wrangler secret put): APPRAISER_TOKEN (Nebius endpoint bearer), APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 }
