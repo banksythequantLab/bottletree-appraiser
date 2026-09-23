@@ -21,7 +21,10 @@ eq("size unstated in query", c("Red Wing salt glaze crock", "Red Wing 3 Gallon C
 eq("hyphenated unit", c(CROCK, "Red Wing 3-Gallon Salt Glaze Crock"), true);
 eq("fraction gallon", c("Red Wing 1/2 gallon jug", "Red Wing 1 Gallon Jug Brown Top"), true);
 eq("fraction matches", c("Red Wing 1/2 gallon jug", "Red Wing 1/2 Gallon Jug Salt Glaze"), false);
-eq("two sizes in title, one matches", c(CROCK, "Red Wing Crock Lot 3 Gallon and 5 Gallon Pair"), false);
+// One matching size is enough — a title naming several sizes is not a contradiction. The query
+// has to name a set here, or the lot rule below rejects this title first, for its own good reason.
+eq("one matching size is enough", c("Red Wing crock pair 5 gallon", "Red Wing Crock Pair 3 Gallon and 5 Gallon"), false);
+eq("but a lot answering a single-item query still goes", c(CROCK, "Red Wing Crock Lot 3 Gallon and 5 Gallon Pair"), true);
 eq("quarts", c("Pyrex Cinderella 4 quart mixing bowl", "Pyrex Cinderella 2 Quart Butterprint Bowl"), true);
 eq("quarts match", c("Pyrex Cinderella 4 quart mixing bowl", "Pyrex 4 Qt Cinderella Bowl Butterprint"), false);
 eq("inches differ", c('Roseville Freesia 8 inch vase', 'Roseville Freesia Vase 6" Blue 119-6'), true);
@@ -71,6 +74,40 @@ eq("case is not a part word", c("Singer Featherweight 221 sewing machine",
 eq("feet as a part", c("Towle Old Master sterling teaspoon", "Feet Set Towle Old Master Sterling Replacement"), true);
 eq("coin roll unaffected", c("1964 Kennedy half dollar roll of 20",
   "1964 Kennedy Half Dollar Roll 20 Coins 90% Silver BU"), false);
+
+// ---- multi-option listings ----
+// These display the cheapest variant's price, so the number is not a price for this item.
+const FIESTA = "Fiesta radioactive red dinner plate";
+eq("choose listing", c(FIESTA, "Choose FIESTA Dinner Plates Ivory Yellow Turquoise Radioactive Red"), true);
+eq("you pick", c(FIESTA, "Vintage Fiesta Dinner Plate You Pick Color Radioactive Red Turquoise"), true);
+eq("your choice", c(FIESTA, "Fiestaware Dinner Plates Your Choice of Color HLC"), true);
+eq("plain listing survives", c(FIESTA, 'Fiesta "Radioactive Red" 10 Dinner Plate Retired Color Genuine HLC'), false);
+
+// ---- set vs single, both directions ----
+const BOWLSET = "Pyrex Butterprint Cinderella mixing bowl set";
+eq("single bowl answering a set query", c(BOWLSET, "Vintage Pyrex Amish Butterprint 442 Cinderella Mixing Bowl Blue"), true);
+eq("set survives", c(BOWLSET, "Pyrex Vintage Amish Butterprint Cinderella Bowl Set of 4"), false);
+eq("plural noun counts as a set", c(BOWLSET, "Vintage Pyrex Amish Blue Butterprint Cinderella Nesting Bowls"), false);
+eq("piece count counts as a set", c(BOWLSET, "PYREX Cinderella Butterprint Nesting 3pc Mixing Bowl Handled"), false);
+const SPOON = "Towle Old Master sterling teaspoon";
+eq("set of 2 answering a single query", c(SPOON, "Towle OLD MASTER Sterling Silver Teaspoons Set of 2 Spoons"), true);
+eq("parenthetical count", c(FIESTA, "Two (2) 1930s FIESTA PLATES ORANGE RED Radioactive"), true);
+eq("single spoon survives", c(SPOON, "Towle Silver OLD MASTER Sterling 1942 6 Teaspoon EXCELLENT Condition"), false);
+// The coin roll query asks for twenty coins, so roll listings must survive.
+const ROLL = "1964 Kennedy half dollar roll of 20";
+eq("roll answering a roll query", c(ROLL, "90% Silver 1964-P/D Kennedy Half Dollar 20-Coin Roll Avg Circ"), false);
+eq("roll of 20 spelled out", c(ROLL, "Original Choice to GEM BU Roll of 20 1964 Kennedy Half Dollars"), false);
+eq("single coin answering a roll query", c(ROLL, "1964 Kennedy Half Dollar 90% Silver BU Coin"), true);
+const JAR = "Hull Little Red Riding Hood cookie jar";
+eq("7 pc set answering a single jar query", c(JAR, "7 pc Hull Little Red Riding Hood set Cookie Jar, Teapot, Creamer"), true);
+eq("6 piece set", c(JAR, "Vintage Hull Little Red Riding Hood 6 Piece Set Cookie Jar Butter Dish"), true);
+eq("a lot is several", c(JAR, "Hull Ceramic Hand-Painted Little Red Riding Hood Girl Figurine Lot, Flawed"), true);
+eq("one jar survives", c(JAR, "Vintage Hull #967 Little Red Riding Hood Cookie Jar"), false);
+// A plain single-item query must not start rejecting ordinary listings.
+eq("no set logic on a plain query", c("Singer Featherweight 221 sewing machine",
+  "Vintage Singer Featherweight Sewing Machine 221-1 Black 1948 Portable"), false);
+eq("accessories mentioned, no count", c("Singer Featherweight 221 sewing machine",
+  "Singer Featherweight 221 with Case and Attachments"), false);
 
 // ---- sizesIn itself ----
 eq("parses gallons", [...(sizesIn("5 gallon crock").get("gal") || [])], [5]);

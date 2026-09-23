@@ -408,6 +408,35 @@ const PART_LEAD = new RegExp(`^\\s*(?:${PART})\\b`, "i");
 const PART_ANY = new RegExp(`\\b(?:${PART})\\b`, "i");
 const REPRO = /\b(?:repro|reproduction|replica|replacement|aftermarket)\b/i;
 
+// A listing that sells several variants under one heading displays the CHEAPEST variant's price.
+// "Choose FIESTA Dinner Plates Ivory Yellow Turquoise Radioactive Red" showed $10.95 in a pool of
+// $25-$125 red plates; $10.95 buys the ivory one. The Browse item summary carries no itemGroupType
+// or itemGroupHref for these — checked against live responses for two queries, every summary came
+// back with no group field whatsoever — so the heading is the only signal available.
+const MULTI_OPTION = /\b(?:choose|you\s*-?\s*pick|u\s*-?\s*pick|your\s+choice|choice\s+of|pick\s+your|mix\s*(?:&|and)\s*match)\b/i;
+
+// Sets and singles are different products at very different prices, in both directions. A single
+// #442 bowl at $20 answered a query for a Butterprint bowl SET otherwise priced $201-$300; and
+// "Towle Old Master Sterling Teaspoons Set of 2" at $140 answered a query for one teaspoon
+// otherwise priced $49-$90, because $140 buys two.
+const SET_WORD = /\b(?:set|sets|pair|pairs|service|lot|nesting|roll|rolls|suite|collection|canteen)\b/i;
+// A bare "(2)" in a title is a quantity nearly every time a seller writes it — "Two (2) 1930s
+// FIESTA PLATES" is two plates at $54, not a $54 plate.
+const EXPLICIT_COUNT = /\b(?:set|lot|pair|group|box|roll|pack)\s+of\s+\d+\b|\(\s*\d+\s*\)|\b\d+\s*(?:pc|pcs|pieces?)\b/i;
+
+// Does the title use a plural of one of the query's own nouns? "Cinderella Nesting Bowls" is a
+// set even though it never says "set", and rejecting it would throw away a good comp.
+function pluralOfQuery(query, title) {
+  const t = String(title).toLowerCase();
+  for (const tok of String(query).toLowerCase().split(/\s+/)) {
+    if (tok.length < 4 || !/^[a-z]+$/.test(tok)) continue;
+    if (new RegExp(`\\b${tok}(?:e?s)\\b`).test(t)) return true;
+  }
+  return false;
+}
+
+function isSetQuery(q) { return SET_WORD.test(q) || EXPLICIT_COUNT.test(q); }
+
 export function contradictsSpec(query, title) {
   const q = String(query || ""), t = String(title || "");
 
@@ -421,6 +450,15 @@ export function contradictsSpec(query, title) {
   if (REPRO.test(t) && !REPRO.test(q)) return true;
   if (PART_ONLY.test(t) && !PART_ONLY.test(q)) return true;
   if (PART_LEAD.test(t) && !PART_ANY.test(q)) return true;
+
+  if (MULTI_OPTION.test(t) && !MULTI_OPTION.test(q)) return true;
+
+  const qSet = isSetQuery(q);
+  // A set asked for, a single piece offered: the price is for one of the several.
+  if (qSet && !SET_WORD.test(t) && !EXPLICIT_COUNT.test(t) && !pluralOfQuery(q, t)) return true;
+  // One piece asked for, several offered: the price is for all of them. A seller who writes
+  // "lot" means several even without a count — "Hull ... Figurine Lot" is not one cookie jar.
+  if (!qSet && (EXPLICIT_COUNT.test(t) || /\blot\b/i.test(t))) return true;
   return false;
 }
 
