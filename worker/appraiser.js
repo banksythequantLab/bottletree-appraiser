@@ -472,6 +472,36 @@ export function contradictsSpec(query, title) {
   return false;
 }
 
+// One seller listing the same thing three times is one offer, not three. eBay returned a 2023
+// Silver Eagle proof set as three near-identical listings, and a roll of war nickels twice under
+// an identical title at $124.95 and $134.99. Counted raw, that reads as a deeper market than
+// exists and drags the median toward whichever item happens to be listed most often — and the
+// card then says "12 comparables listed right now" when there are eight things for sale.
+//
+// Same seller is required. Two DIFFERENT sellers with identical titles are two real offers, and
+// collapsing those would understate the market rather than merely miscount it. The cheapest of a
+// seller's duplicates is the one kept: it is what a buyer would actually pay them.
+// Sellers relist the same item with the tail of the title edited — "…23RC", "…23RC IN OGP",
+// "…23RC IN OGP BOX" were one proof set three times. A fixed-length key cannot see that, because
+// the shortest of the three is shorter than the key. A prefix RELATION can. The 25-character
+// floor stops two genuinely different items with a generic opening from collapsing into one.
+const sameThing = (a, b) =>
+  a === b || (Math.min(a.length, b.length) >= 25 && (a.startsWith(b) || b.startsWith(a)));
+
+export function dedupeOffers(list) {
+  const kept = [];
+  for (const l of list || []) {
+    // No seller means no way to tell a duplicate from a coincidence, so it is kept as its own.
+    if (!l.seller) { kept.push(l); continue; }
+    const seller = String(l.seller).toLowerCase(), t = normTitle(l.title);
+    const i = kept.findIndex(k => String(k.seller || "").toLowerCase() === seller && k.seller
+      && sameThing(normTitle(k.title), t));
+    if (i < 0) kept.push(l);
+    else if (l.price > 0 && l.price < kept[i].price) kept[i] = l;   // cheapest of a seller's repeats
+  }
+  return kept;
+}
+
 async function ebaySearch(env, tok, query, limit, signal) {
   const u = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
   u.searchParams.set("q", String(query).slice(0, 120));
@@ -513,11 +543,13 @@ export async function ebayActive(env, query, limit = 12) {
         price: Number(i.price?.value) || null,
         currency: i.price?.currency || "USD",
         condition: i.condition || "",
+        seller: (i.seller && i.seller.username) || "",
         note: `Listed now on eBay${i.condition ? ` — ${i.condition}` : ""}`,
         live: true,
       })).filter(x => x.price > 0
         && !contradictsGeneration(query, x.title)
         && !contradictsSpec(query, x.title));
+      out = dedupeOffers(out);
       if (out.length) { used = q; break; }
     }
     if (r && r.ok) {
