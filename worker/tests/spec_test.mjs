@@ -30,6 +30,17 @@ eq("different units do not collide", c("Red Wing 5 gallon crock", 'Red Wing Croc
 // "in" as the English word must never be read as inches.
 eq('bare "in" is not inches', c("Griswold 8 inch skillet", "Griswold No 8 Skillet Made in Erie PA"), false);
 
+// Spelled-out capacities. The six-gallon crock at $1,195 sailed through a digits-only pattern
+// while the three-gallon ones were being correctly rejected, which moved the median the wrong way.
+eq("six gallon spelled out", c(CROCK, "Antique Red Wing Stoneware Company Salt Glaze Six Gallon Crock Leaf"), true);
+eq("three gallon spelled out", c(CROCK, "Red Wing Three Gallon Salt Glaze Crock Birch Leaf"), true);
+eq("five gallon spelled out matches", c(CROCK, "Antique Red Wing Five Gallon Salt Glaze Crock Leaf Decorated"), false);
+eq("word in query, digit in title", c("Red Wing five gallon crock", "Red Wing 5 Gallon Crock Salt Glaze"), false);
+eq("word in query, wrong digit in title", c("Red Wing five gallon crock", "Red Wing 3 Gallon Crock"), true);
+eq("half gallon word", c("Red Wing half gallon jug", "Red Wing 1 Gallon Jug"), true);
+eq("half gallon matches the fraction", c("Red Wing half gallon jug", "Red Wing 1/2 Gallon Jug"), false);
+eq("word number not near a unit is ignored", c(CROCK, "Red Wing 5 Gallon Crock One Owner Estate Find"), false);
+
 // ---- reproductions ----
 eq("reproduction", c(CROCK, "Reproduction Red Wing 5 Gallon Crock Salt Glaze Style"), true);
 eq("repro abbreviated", c("Hull Little Red Riding Hood cookie jar", "Repro Little Red Riding Hood Cookie Jar"), true);

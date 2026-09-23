@@ -363,7 +363,19 @@ export function contradictsGeneration(query, title) {
 // Size. Only capacities and inches, and only units written out — "in" as an abbreviation is the
 // English word far more often than it is a measurement. A unit is compared only when the query
 // states it too, so an unstated size never rejects anything.
-const SIZE_RE = /(\d+(?:\.\d+)?|\d+\s*\/\s*\d+)\s*-?\s*(gal(?:lon)?s?|quarts?|qts?|pints?|inch(?:es)?|")/gi;
+// Sellers write capacities as words at least as often as digits — the live run that prompted
+// this filter answered a 5 gallon query with an "Antique Red Wing ... Six Gallon Crock" at
+// $1,195, which a digits-only pattern let straight through while it was correctly throwing out
+// the 3 gallon ones. That is worse than no filter: it strips the honest low comps and keeps the
+// outlier. Words and digits have to be read the same way.
+const NUM_WORDS = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, fifteen: 15, twenty: 20, half: 0.5, quarter: 0.25,
+};
+const NUM_WORD_RE = Object.keys(NUM_WORDS).join("|");
+const SIZE_RE = new RegExp(
+  `(\\d+(?:\\.\\d+)?|\\d+\\s*\\/\\s*\\d+|${NUM_WORD_RE})\\s*-?\\s*(gal(?:lon)?s?|quarts?|qts?|pints?|inch(?:es)?|")`,
+  "gi");
 const UNIT_OF = u => {
   const s = u.toLowerCase();
   if (s.startsWith("gal")) return "gal";
@@ -374,9 +386,10 @@ const UNIT_OF = u => {
 export function sizesIn(text) {
   const out = new Map();
   for (const m of String(text || "").matchAll(SIZE_RE)) {
-    const n = m[1].includes("/")
-      ? (([a, b]) => Number(a) / Number(b))(m[1].split("/"))
-      : Number(m[1]);
+    const raw = m[1].toLowerCase();
+    const n = raw in NUM_WORDS ? NUM_WORDS[raw]
+      : raw.includes("/") ? (([a, b]) => Number(a) / Number(b))(raw.split("/"))
+      : Number(raw);
     if (!Number.isFinite(n) || n <= 0) continue;
     const u = UNIT_OF(m[2]);
     if (!out.has(u)) out.set(u, new Set());
