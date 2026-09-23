@@ -769,11 +769,14 @@ const STOP = new Set(["a","an","the","and","or","of","with","from","in","on","fo
   "cast","iron","brass","copper","tin","steel","metal","wood","wooden","oak","pine","glass",
   "ceramic","pottery","stoneware","porcelain","black","brown","white","red","green","blue"]);
 const words = s => new Set((String(s || "").toLowerCase().match(/[a-z][a-z'-]{2,}/g) || []).filter(w => !STOP.has(w)));
-const dealerName = d => {
+// Exported under a clearer name for the tests; `words` stays the short internal name.
+export const significantWords = words;
+
+export const dealerName = d => {
   const head = String(d || "").trim().split(/[.;,\n]/)[0];
   return head.split(/\s+/).slice(0, 10).join(" ").trim() || String(d || "").trim().slice(0, 80);
 };
-function ignoresDealer(name, description) {
+export function ignoresDealer(name, description) {
   const dw = words(dealerName(description));
   if (!dw.size || !String(name || "").trim()) return false;
   for (const w of words(name)) if (dw.has(w)) return false;
@@ -1059,8 +1062,22 @@ export async function appraise(env, req) {
   // "256 gb total" is what the dealer typed; "SK Hynix 32GB DDR4-2400 ECC RDIMM" is what finds comps.
   let searchName = ident.name;
   if (ignoresDealer(ident.name, req.description)) {
+    // ignoresDealer means the model's name shares NOT ONE significant word with what the dealer
+    // wrote. That covers two very different situations, and the difference is how much the dealer
+    // actually said. Against "256 gb total" the model's "SK Hynix 32GB DDR4-2400 ECC RDIMM" is the
+    // same object described better, and it is the far better search term. Against "WWII silver
+    // Jefferson nickels, 4 rolls" the model's "Reloaded Federal 12 Gauge Shotshells" is a
+    // different object — it misread the photographs — and searching its name returned four
+    // shotgun-ammo listings for a box of coins. The dealer is holding the thing; when they have
+    // described it in substance, their words win the search too, not just the display.
+    const said = words(dealerName(req.description));
     warnings.push(`model named it '${ident.name}'; using the dealer's description for the name instead`);
     ident.name = dealerName(req.description);
+    if (said.size >= 3) {
+      searchName = ident.name;
+      warnings.push(`the model's identification did not match your description, so comparables were ` +
+        `searched using your words rather than its own — check the item name is right.`);
+    }
   }
   if (String(req.markings || "").trim() && !ident.maker.trim()) {
     const maker = makerFromMarks(req.markings);
