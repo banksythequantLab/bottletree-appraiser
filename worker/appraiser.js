@@ -579,6 +579,27 @@ export function keptLive(live, comps) {
   return [...taken].sort((a, b) => a - b).map(i => live[i]);
 }
 
+// The one cross-check in this pipeline where melt and comps are genuinely independent.
+//
+// Ordinarily they are not: the comps query is built from the identification, so a wrong name
+// searches a wrong market and gets a pool that agrees with it. Run 4 of the nickel lot had melt
+// $260 against a comps median of $289 — an 11% agreement, on an identification that undervalued
+// the lot by half. Comparing the two totals proves nothing.
+//
+// A detected LOT changes that, because the count comes from the dealer's own words rather than
+// from the identification. So the comparison becomes: what one piece is worth as metal, against
+// what one piece is actually listed at. Two routes to the same number that do not share an
+// input. On the real war-nickel lot that is $584/4 = $146 of silver per roll against a $132
+// median asking price per roll — 1.1x, which is what agreement looks like. Had the same photos
+// been read as four one-ounce Silver Eagles, it would have been $65 of silver per piece against
+// a $289 median — 4.4x, and loud.
+export function unitDisagreement(meltValue, count, marketMedian) {
+  if (!(meltValue > 0) || !(count > 1) || !(marketMedian > 0)) return null;
+  const perUnit = meltValue / count;
+  const hi = Math.max(perUnit, marketMedian), lo = Math.min(perUnit, marketMedian);
+  return Math.round((hi / lo) * 100) / 100;
+}
+
 // A handful of asking prices, summarised the way a dealer would say it out loud:
 // "three listed right now, $150 to $189". The median is the honest middle; the count is the caveat.
 function summarise(listings) {
@@ -1397,6 +1418,17 @@ export async function appraise(env, req) {
     if (before && lot.unit_retail >= before * 1.5)
       warnings.push(`per-piece price raised from $${before} to $${lot.unit_retail} so the ${lot.count} ` +
         `pieces add up to the lot total above.`);
+
+    // Melt per piece against the asking price per piece — see unitDisagreement for why this
+    // particular comparison is worth anything when comparing the totals is not.
+    const d = melt && melt.applied && marketShown
+      ? unitDisagreement(melt.value, lot.count, marketShown.median) : null;
+    if (d && d >= 2) {
+      const perUnit = Math.round(melt.value / lot.count);
+      warnings.push(`metal content and the market disagree about what one piece is: $${perUnit} of ` +
+        `${melt.metal} each against a $${marketShown.median} median asking price each (${d}x apart). ` +
+        `One of the two is about the wrong item — check the identification before you price it.`);
+    }
   }
 
   // A statement of fact the dealer can check, rather than an opinion they have to trust.
