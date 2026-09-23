@@ -536,7 +536,17 @@ function makerFromMarks(marks) {
 // apart: sometimes it prices one module, sometimes eight, and it reports both as "the price".
 // Multiplication is not a judgement call, so we take it away from the model and do it here.
 const CAP = { mb: 1 / 1024, gb: 1, tb: 1024 };
-const COUNT_RE = /(?:\b(?:lot|set|box|pack|qty|quantity|group)\s*(?:of\s*)?[:#]?\s*(\d{1,3})\b)|(?:\b(\d{1,3})\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count|ct)\b)/i;
+// "of" is mandatory after lot/box/set. Without it, "Lot 14" on an estate-sale tag is a lot
+// NUMBER, not a quantity, and multiplying a single item's price by fourteen is the worst thing
+// this code could do. Written-out small counts are common on tags and cost nothing to read.
+const COUNT_RE = /(?:\b(?:lot|set|box|pack|roll|group|case|tray|bag)\s+of\s+(\d{1,3})\b)|(?:\b(?:qty|quantity)\s*[:#]?\s*(\d{1,3})\b)|(?:\b(\d{1,3})\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count|ct)\b)/i;
+const WORD_COUNT = { pair: 2, brace: 2, dozen: 12, "half dozen": 6, "half-dozen": 6 };
+const WORD_COUNT_RE = /\b(half[- ]dozen|dozen|pair|brace)\s+of\s+|\b(half[- ]dozen|dozen|pair|brace)\b/i;
+
+// A "3 piece carving set" is one object that happens to have three parts, and its value is not
+// three times one piece of it. Same for a 4 piece tea service. The count words are identical to a
+// genuine lot's, so the surrounding noun is what separates them.
+const MATCHED_SET = /\b(set|service|suite|kit|ensemble|setting|canteen)\b/i;
 
 // A capacity stated as a total, divided by the capacity stated per piece: "256 gb total" against
 // markings reading "32gb" is eight modules, and the dealer never had to type the number 8.
@@ -560,8 +570,17 @@ export function detectLot(description, markings) {
   const both = `${description || ""} ${markings || ""}`;
   const m = COUNT_RE.exec(both);
   if (m) {
-    const n = Number(m[1] || m[2]);
-    if (n >= 2 && n <= 500) return { count: n, how: "the dealer stated the count" };
+    const n = Number(m[1] || m[2] || m[3]);
+    // m[3] is the "N pieces" branch — the only one that can be describing the parts of a single
+    // matched object rather than a quantity of separate ones.
+    const fromPieces = m[3] !== undefined;
+    if (n >= 2 && n <= 500 && !(fromPieces && MATCHED_SET.test(both)))
+      return { count: n, how: "the dealer stated the count" };
+  }
+  const w = WORD_COUNT_RE.exec(both);
+  if (w) {
+    const n = WORD_COUNT[String(w[1] || w[2]).toLowerCase().replace("-", " ")];
+    if (n) return { count: n, how: `the dealer wrote "${String(w[1] || w[2]).toLowerCase()}"` };
   }
   const total = capacity(description, true) || capacity(markings, true);
   const unit = capacity(markings, false) || capacity(description, false);
