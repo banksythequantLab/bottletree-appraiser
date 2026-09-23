@@ -547,15 +547,31 @@ export async function ebayActive(env, query, limit = 12) {
 // comparables it kept, sometimes with the title tidied up, so match on URL first and fall back to
 // the title — a truncated or lightly reworded title still matches on its opening.
 const normTitle = s => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+// One comparable claims at most one listing. Matching each comparable against every live listing
+// independently let a single kept comparable pull in three duplicate listings of the same item,
+// and the market line then said "3 comparables listed" for one thing listed three times. The
+// count the dealer reads has to be the number of comparables the price actually rests on.
 export function keptLive(live, comps) {
   if (!live || !live.length || !comps || !comps.length) return [];
-  const urls = new Set(comps.map(c => String(c.url || "")).filter(Boolean));
-  const titles = comps.map(c => normTitle(c.title)).filter(t => t.length >= 12);
-  return live.filter(l => {
-    if (l.url && urls.has(String(l.url))) return true;
-    const lt = normTitle(l.title);
-    return titles.some(t => t === lt || lt.startsWith(t.slice(0, 40)) || t.startsWith(lt.slice(0, 40)));
-  });
+  const taken = new Set();
+  const claim = pred => {
+    const i = live.findIndex((l, idx) => !taken.has(idx) && pred(l));
+    if (i >= 0) { taken.add(i); return true; }
+    return false;
+  };
+  for (const c of comps) {
+    const url = String(c.url || "");
+    const t = normTitle(c.title);
+    // Exact URL, then exact title, then a long prefix — a model that tidied or truncated a title
+    // still matches, but a short or generic opening cannot claim an unrelated listing.
+    if (url && claim(l => String(l.url || "") === url)) continue;
+    if (t.length >= 12 && claim(l => normTitle(l.title) === t)) continue;
+    if (t.length >= 30) claim(l => {
+      const lt = normTitle(l.title);
+      return lt.startsWith(t.slice(0, 30)) || t.startsWith(lt.slice(0, 30));
+    });
+  }
+  return [...taken].sort((a, b) => a - b).map(i => live[i]);
 }
 
 // A handful of asking prices, summarised the way a dealer would say it out loud:
@@ -782,7 +798,11 @@ const incomplete = d => num((d.price_range || {}).high) <= 0 || !strs(d.evidence
 const STOP = new Set(["a","an","the","and","or","of","with","from","in","on","for","to","is","it","its","this","that",
   "has","no","not","very","old","antique","vintage","piece","item","heavy","small","large",
   "cast","iron","brass","copper","tin","steel","metal","wood","wooden","oak","pine","glass",
-  "ceramic","pottery","stoneware","porcelain","black","brown","white","red","green","blue"]);
+  "ceramic","pottery","stoneware","porcelain","black","brown","white","red","green","blue",
+  // Sentence scaffolding. A dealer writes "These are four rolls..."; counting "these" and "are"
+  // as things they told us inflates every overlap measure built on this set.
+  "these","those","there","here","they","them","are","was","were","been","being","have","had",
+  "got","some","just","really","about","maybe","looks","like"]);
 const words = s => new Set((String(s || "").toLowerCase().match(/[a-z][a-z'-]{2,}/g) || []).filter(w => !STOP.has(w)));
 // Exported under a clearer name for the tests; `words` stays the short internal name.
 export const significantWords = words;
@@ -809,8 +829,23 @@ export function searchPhrase(s) {
 export function ignoresDealer(name, description) {
   const dw = words(dealerName(description));
   if (!dw.size || !String(name || "").trim()) return false;
-  for (const w of words(name)) if (dw.has(w)) return false;
-  return true;
+  let shared = 0;
+  for (const w of words(name)) if (dw.has(w)) shared++;
+  if (shared === 0) return true;
+
+  // One word in common is not agreement. Production, 2026-09-23: against "4 rolls of world war 2
+  // silver nickels" the model answered "2023 American Silver Eagle Coin Set". The single word
+  // "silver" cleared the old zero-overlap test, so the dealer's identification never took over —
+  // and because the melt check prices whatever the identification says the item is, it valued
+  // four one-ounce Eagles at $260 instead of 160 wartime nickels at $585. The same photograph had
+  // priced at $585 minutes earlier. Underpricing a lot below its own scrap value is the worst
+  // number this tool can produce, and one incidental shared word was all it took.
+  //
+  // Only applied when the dealer gave enough words for a single match to be plausibly accidental.
+  // Below that, a lone shared word is a large share of everything they said, and overriding a
+  // specific identification on that basis would do more harm than good.
+  if (dw.size >= 4 && shared < 2) return true;
+  return false;
 }
 const MAKER_SUFFIX = "(?:CO\\.?|COMPANY|MFG\\.?|MANUFACTURING|BROS\\.?|BROTHERS|& SONS?|INC\\.?|LTD\\.?|WORKS|POTTERY|FOUNDRY)";
 function makerFromMarks(marks) {

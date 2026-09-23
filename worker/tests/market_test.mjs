@@ -36,5 +36,24 @@ eq("null inputs", keptLive(null, null), []);
 // A short title must not match everything by prefix.
 eq("short title is not a wildcard", keptLive(LIVE, [{ title: "LOT" }]), []);
 
+// Production, 2026-09-23: three near-identical Silver Eagle listings, the model kept one and
+// called the other two "Duplicate listing of same item". One kept comparable must not claim all
+// three, or the market line reads "3 comparables listed" for one thing listed three times.
+const DUPES = [
+  L(289, "2023 S PROOF SILVER EAGLE LIMITED EDITION PROOF SET 23RC IN OGP", "https://ebay.com/d1"),
+  L(280, "2023 S PROOF SILVER EAGLE LIMITED EDITION PROOF SET 23RC IN OGP BOX", "https://ebay.com/d2"),
+  L(300, "2023 S PROOF SILVER EAGLE LIMITED EDITION PROOF SET 23RC", "https://ebay.com/d3"),
+];
+eq("one comparable claims one listing",
+  prices(keptLive(DUPES, [{ title: "2023 S PROOF SILVER EAGLE LIMITED EDITION PROOF SET 23RC IN OGP" }])), [289]);
+eq("two comparables claim two listings",
+  keptLive(DUPES, [{ url: "https://ebay.com/d1" }, { url: "https://ebay.com/d3" }]).length, 2);
+eq("a comparable matching nothing claims nothing",
+  keptLive(DUPES, [{ title: "Griswold No 8 Cast Iron Skillet Large Block Logo" }]), []);
+// A short comparable title must not reach the prefix rule at all.
+eq("short title cannot claim by prefix", keptLive(DUPES, [{ title: "2023 SILVER" }]), []);
+eq("order follows the live listings, not the comparables",
+  prices(keptLive(DUPES, [{ url: "https://ebay.com/d3" }, { url: "https://ebay.com/d1" }])), [289, 300]);
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

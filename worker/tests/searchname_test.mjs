@@ -35,6 +35,26 @@ eq("shared word means no conflict",
 eq("no shared word is a conflict",
   ignoresDealer("Reloaded Federal 12 Gauge Shotshells", "WWII Silver Jefferson Nickels 4 Rolls"), true);
 
+// One shared word is not agreement. Production, 2026-09-23: "2023 American Silver Eagle Coin
+// Set" against "4 rolls of world war 2 silver nickels" shares only "silver". The old test let it
+// through, the dealer's identification never took over, and melt priced four one-ounce Eagles at
+// $260 instead of 160 wartime nickels at $585 — below the lot's own scrap value.
+eq("one incidental shared word is still a conflict",
+  ignoresDealer("2023 American Silver Eagle Coin Set",
+    "These are 4 rolls of world war 2 silver nickels"), true);
+eq("and the dealer's words drive the search",
+  searchesDealerWords("2023 American Silver Eagle Coin Set",
+    "These are 4 rolls of world war 2 silver nickels"), true);
+eq("two shared words is agreement",
+  ignoresDealer("WWII silver nickel rolls, 4 rolls",
+    "These are 4 rolls of world war 2 silver nickels"), false);
+// With a short description one shared word is a large part of everything the dealer said, so a
+// specific identification is not overridden on that basis.
+eq("short description keeps the model's identification",
+  ignoresDealer("Red Wing 5 gallon salt glaze crock", "big stoneware crock"), false);
+eq("sentence scaffolding is not something the dealer told us",
+  significantWords("these are some of them").size, 0);
+
 // dealerName takes the first clause, which is where people put the identification.
 eq("first clause only", dealerName("WWII Silver Jefferson Nickels, 4 rolls, from my father's estate"),
   "WWII Silver Jefferson Nickels");
