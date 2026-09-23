@@ -64,7 +64,12 @@ EXAMPLE of a filled answer for a different item (format only):
 const REPRICE_SYSTEM = `You are a senior antiques appraiser. You previously appraised an item; now you have live
 comparable listings from the web. Comparables may be irrelevant or asking (not sold) prices - weigh them
 accordingly. Return ONLY a JSON object: {"price_range": {...same shape...}, "comparables": [{"title","price","url","source","note"}],
-"basis_note": "one sentence"}. Keep at most 4 comparables that are actually similar.`;
+"basis_note": "one sentence", "rejected": [{"title","why"}]}.
+Keep at most 4 comparables that are actually similar.
+Every comparable you were given that you do NOT keep must appear in "rejected" with a short, concrete
+reason - "Riviera, a different Homer Laughlin line", "divided plate, not a dinner plate", "rare Pumpkin
+colorway, not comparable to blue". This list is read by the dealer, so say what is different about the
+item, never "less relevant" or "not similar".`;
 
 const PRICE_SYSTEM = `You are an antiques dealer setting a retail price. You MUST answer with numbers even when unsure:
 give a wide range rather than zeros. Return ONLY JSON:
@@ -1084,6 +1089,7 @@ export async function appraise(env, req) {
   price.basis = cleanedBasis.length ? cleanedBasis[0] : price.basis;
 
   const comparables = [];
+  let rejected = [];
   const q = compsQuery({ ...ident, name: searchName });
   // eBay first: it is the only live, free, permitted price feed we have. Tavily backfills the
   // categories eBay is thin on, and covers us entirely when no eBay keys are configured.
@@ -1120,6 +1126,25 @@ export async function appraise(env, req) {
       if (second.basis_note) price.basis = (price.basis + " " + String(second.basis_note)).trim();
       for (const cp of (second.comparables || []).slice(0, 4))
         if (cp && typeof cp === "object" && cp.title) comparables.push(pick(cp, COMP_KEYS));
+
+      // The model has always been free to discard comparables — "keep at most 4 that are actually
+      // similar" is a judgement call it makes on every appraisal — but until now it made it
+      // silently. The deterministic filters above catch mechanical contradictions: a 3 gallon crock
+      // answering a 5 gallon query, a knob answering a radio. They cannot catch a Riviera plate
+      // answering a Fiesta query, or a divided plate standing in for a dinner plate, and no regex
+      // will. That judgement belongs to the model. What does NOT belong to it is making that
+      // judgement where nobody can see it: a model that quietly drops the one honest comp and
+      // prices from three wrong ones is the exact failure this tool spent two days removing from
+      // the search layer. So the reasons are recorded, and when most of the pool goes, the dealer
+      // is told rather than shown a confident number built on what survived.
+      rejected = (second.rejected || [])
+        .filter(r => r && typeof r === "object" && r.title)
+        .map(r => ({ title: String(r.title).slice(0, 160), why: String(r.why || "").slice(0, 200) }));
+      if (rejected.length) console.log("repricer rejected", JSON.stringify(rejected));
+      if (hits.length >= 4 && comparables.length && rejected.length >= hits.length - 1)
+        warnings.push(`only ${comparables.length} of the ${hits.length} listings found were judged ` +
+          `comparable — the rest were set aside as different items (${rejected.slice(0, 3).map(r => r.why).filter(Boolean).join("; ")}). ` +
+          `A price built on ${comparables.length} listing${comparables.length === 1 ? "" : "s"} is thinner than the count suggests.`);
     } catch (e) { warnings.push(`comps re-pricing failed: ${e.message}`); }
     // Relevant listings with no numbers on them cannot correct anything. Search returns page
     // descriptions, and a marketplace's description often names the item without ever quoting a
@@ -1224,6 +1249,9 @@ export async function appraise(env, req) {
     melt,
     lot,
     market,
+    // What the model set aside and why. A dealer who disagrees with a price should be able to see
+    // which listings were kept out of it — including the ones it was wrong to exclude.
+    rejected_comparables: rejected.slice(0, 8),
     live_listings: (live || []).slice(0, 6),
     item_id: req.item_id,
     identification: ident,
