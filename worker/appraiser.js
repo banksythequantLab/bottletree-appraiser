@@ -238,6 +238,15 @@ const firstPrice = t => { const m = PRICE_RE.exec(t || ""); if (!m) return null;
 // We report these as what they are: currently listed, not sold.
 let _ebayTok = { at: 0, token: null };
 
+// The same silent catch that hid a dead Tavily key for months was sitting here too. A price feed
+// that fails quietly is worse than one that is absent, because the appraisal still produces a
+// confident number and nothing on the page says where it came from. Record the reason.
+let _ebayFail = null;
+let _ebayBroadened = null;
+export const ebayFailure = () => _ebayFail;
+// The query that actually returned listings, when it was not the one we asked for.
+export const ebayBroadenedTo = () => _ebayBroadened;
+
 async function ebayToken(env) {
   if (_ebayTok.token && Date.now() - _ebayTok.at < 6600e3) return _ebayTok.token;   // 7200s life, refresh early
   const basic = btoa(`${env.EBAY_CLIENT_ID}:${env.EBAY_CLIENT_SECRET}`);
@@ -246,45 +255,148 @@ async function ebayToken(env) {
     headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${basic}` },
     body: "grant_type=client_credentials&scope=" + encodeURIComponent("https://api.ebay.com/oauth/api_scope"),
   });
-  if (!r.ok) throw new Error(`ebay auth ${r.status}`);
+  if (!r.ok) {
+    const detail = await r.text().catch(() => "");
+    _ebayFail = `eBay rejected the API credentials (${r.status})`;
+    console.log("ebay auth failed", r.status, detail.slice(0, 300));
+    throw new Error(`ebay auth ${r.status}`);
+  }
   const j = await r.json();
   if (!j.access_token) throw new Error("ebay auth: no token");
   _ebayTok = { at: Date.now(), token: j.access_token };
   return j.access_token;
 }
 
+// eBay's search is AND-ish: one token it has never seen returns nothing at all, however good the
+// rest of the query is. A dealer's marking is exactly that token. "32GB DDR4 SDRAM DIMM 2Rx4
+// C424TRB111" returns 0 results; drop the marking and the same search returns 6,325 listings
+// between $198 and $1,140. Silence from eBay is far more often an over-specific query than an
+// item nobody is selling.
+const OPAQUE_TOKEN = /^(?=.*[a-z])(?=(?:.*\d){3,})[a-z0-9-]{6,}$/i;
+
+// The query reaching eBay is assembled from the model's name, the maker and the period, so it
+// arrives carrying punctuation and filler: "32GB DDR4 SDRAM DIMM (Part C424TRB111)" and a period
+// guess like "2015-2023". eBay matches on words, and "(Part" and a date range are words it will
+// happily try to match, which is how a search for server RAM came back with a DDR5 desktop kit.
+// A single year is kept — on an antique it is the most useful token there is.
+const EBAY_FILLER = /^(part|parts|model|mod|no|number|circa|ca|c|approx|approximately|unknown|n\/a|and|the|with|for)$/i;
+
+export function cleanForEbay(query) {
+  return String(query || "")
+    .split(/\s+/)
+    .map(t => t.replace(/[^\p{L}\p{N}\-/&.]+/gu, ""))          // strip brackets, commas, dashes-as-punctuation
+    .filter(t => t
+      && !EBAY_FILLER.test(t)
+      && !/^\d{4}\s*[-–]\s*\d{4}$/.test(t)                      // "2015-2023" is a guess, not a search term
+      && !/^[-/&.]+$/.test(t))
+    .join(" ")
+    .trim();
+}
+
+export function broaden(query) {
+  const toks = String(query || "").split(/\s+/).filter(Boolean);
+  const out = [];
+  const seen = new Set([toks.join(" ")]);
+  const add = ts => { const s = ts.join(" "); if (s && !seen.has(s)) { seen.add(s); out.push(s); } };
+  // First drop anything shaped like a part number or a serial: letters and digits mixed, long.
+  const noPart = toks.filter(t => !OPAQUE_TOKEN.test(t.replace(/[^a-z0-9-]/gi, "")));
+  if (noPart.length) add(noPart);
+  // Then fall back to the leading words, which carry maker and category. Two steps, because an
+  // antique query has no part number to drop — "Roseville Freesia vase 1945" needs the year gone
+  // before eBay will match it, and that is a trailing word rather than an opaque token.
+  const base = noPart.length ? noPart : toks;
+  add(base.slice(0, 4));
+  add(base.slice(0, 3));
+  return out;
+}
+
+// Broadening buys results at the cost of precision, and eBay's relevance engine is loose enough
+// to answer a DDR4 query with DDR3 parts. In one run that put PC3L-8500R modules at $30 alongside
+// the right DDR4 parts at $200 and halved the median. A generation is not a nuance — it is a
+// different product at a different price — so a listing that names a different one is rejected.
+// The digit straight after ddr/pc is the generation, whether or not a speed follows it:
+// DDR4, PC4-2933, PC3L-8500R, and DDR56400 (a DDR5 part) all resolve correctly.
+const GEN = t => {
+  const m = /\b(?:ddr|pc)(\d)/i.exec(String(t || ""));
+  return m ? m[1] : null;
+};
+
+// SO-DIMM is laptop memory. A search for server RDIMMs answered with SO-DIMM kits is the same
+// class of error as the wrong generation: a different product, at a different price.
+const SODIMM = t => /\bso[- ]?dimm\b/i.test(String(t || ""));
+
+export function contradictsGeneration(query, title) {
+  const q = GEN(query), t = GEN(title);
+  if (q && t && q !== t) return true;
+  // Only reject on form factor when the query is specific about wanting the other one.
+  if (/\br?dimm\b/i.test(query) && !SODIMM(query) && SODIMM(title)) return true;
+  return false;
+}
+
+async function ebaySearch(env, tok, query, limit, signal) {
+  const u = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
+  u.searchParams.set("q", String(query).slice(0, 120));
+  u.searchParams.set("limit", String(limit));
+  // Fixed price only: an auction at $0.99 with three days left is not a price signal.
+  u.searchParams.set("filter", "buyingOptions:{FIXED_PRICE}");
+  const r = await fetch(u, {
+    headers: {
+      authorization: `Bearer ${tok}`,
+      "X-EBAY-C-MARKETPLACE-ID": env.EBAY_MARKETPLACE || "EBAY_US",
+      "content-type": "application/json",
+    },
+    signal,
+  });
+  return { r, u };
+}
+
 async function ebayActive(env, query, limit = 12) {
-  if (!env.EBAY_CLIENT_ID || !env.EBAY_CLIENT_SECRET) return null;
+  _ebayFail = null;
+  _ebayBroadened = null;
+  if (!env.EBAY_CLIENT_ID || !env.EBAY_CLIENT_SECRET) {
+    _ebayFail = "no eBay API keys are configured";
+    return null;
+  }
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 12000);
   try {
     const tok = await ebayToken(env);
-    const u = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
-    u.searchParams.set("q", String(query).slice(0, 120));
-    u.searchParams.set("limit", String(limit));
-    // Fixed price only: an auction at $0.99 with three days left is not a price signal.
-    u.searchParams.set("filter", "buyingOptions:{FIXED_PRICE}");
-    const r = await fetch(u, {
-      headers: {
-        authorization: `Bearer ${tok}`,
-        "X-EBAY-C-MARKETPLACE-ID": env.EBAY_MARKETPLACE || "EBAY_US",
-        "content-type": "application/json",
-      },
-      signal: ac.signal,
-    });
-    if (!r.ok) return null;
-    const j = await r.json();
-    return (j.itemSummaries || []).map(i => ({
-      title: String(i.title || "").slice(0, 160),
-      url: i.itemWebUrl || "",
-      source: "ebay.com",
-      price: Number(i.price?.value) || null,
-      currency: i.price?.currency || "USD",
-      condition: i.condition || "",
-      note: `Listed now on eBay${i.condition ? ` — ${i.condition}` : ""}`,
-      live: true,
-    })).filter(x => x.price > 0);
-  } catch { return null; }
+    const base = cleanForEbay(query) || String(query);
+    let r, u, out = [], used = null;
+    for (const q of [base, ...broaden(base)]) {
+      ({ r, u } = await ebaySearch(env, tok, q, limit, ac.signal));
+      if (!r.ok) break;
+      const j = await r.json();
+      out = (j.itemSummaries || []).map(i => ({
+        title: String(i.title || "").slice(0, 160),
+        url: i.itemWebUrl || "",
+        source: "ebay.com",
+        price: Number(i.price?.value) || null,
+        currency: i.price?.currency || "USD",
+        condition: i.condition || "",
+        note: `Listed now on eBay${i.condition ? ` — ${i.condition}` : ""}`,
+        live: true,
+      })).filter(x => x.price > 0 && !contradictsGeneration(query, x.title));
+      if (out.length) { used = q; break; }
+    }
+    if (r && r.ok) {
+      // Record when the exact description found nothing, so the dealer is told the prices are for
+      // comparable items rather than for this one.
+      if (used && used !== String(query)) _ebayBroadened = used;
+      return out;
+    }
+    if (r && !r.ok) {
+      const detail = await r.text().catch(() => "");
+      _ebayFail = `eBay search returned ${r.status}`;
+      console.log("ebay search failed", r.status, u.toString().slice(0, 200), detail.slice(0, 400));
+      return null;
+    }
+    return out;
+  } catch (e) {
+    if (!_ebayFail) _ebayFail = e.name === "AbortError" ? "the eBay search timed out" : `the eBay search failed (${e.message})`;
+    console.log("ebay search threw", String(e && e.message));
+    return null;
+  }
   finally { clearTimeout(t); }
 }
 
@@ -842,6 +954,17 @@ export async function appraise(env, req) {
   // Only the Browse API produces a market range. See the note above searchComps for why search
   // hits do not get one.
   const market = (live && live.length) ? summarise(live) : null;
+  // Keys configured but no listings back means the feed is broken, not that eBay is empty.
+  const ebayWhy = ebayFailure();
+  if (ebayWhy && ebayWhy !== "no eBay API keys are configured")
+    warnings.push(`LIVE EBAY PRICES UNAVAILABLE — ${ebayWhy}. Today's asking prices did not reach ` +
+      `this appraisal, so treat the number below as an estimate rather than the market.`);
+  // Nothing matched the exact description, so these prices are for the nearest comparable thing.
+  // The dealer should know that before trusting the range on a piece with unusual markings.
+  const broadenedTo = ebayBroadenedTo();
+  if (market && broadenedTo)
+    warnings.push(`no eBay listing matched the full description, so these prices are for ` +
+      `"${broadenedTo}" — comparable items rather than this exact one.`);
   if (hits.length) {
     const repriceUser = `Item: ${JSON.stringify(ident)}\nCondition: ${listing.condition_grade}\n` +
       `Current price_range: ${JSON.stringify(price)}\n` +
