@@ -333,6 +333,63 @@ export function contradictsGeneration(query, title) {
   return false;
 }
 
+// The antiques equivalent of the generation problem. Against ten real antique identifications,
+// eBay answered a "Red Wing 5 gallon salt glaze crock" query with 3 gallon crocks ($30) beside
+// 5 gallon ones ($1,195), and a "Zenith Bakelite tube radio" query with a single radio KNOB at
+// $19. Both are the same error as DDR3-for-DDR4: a different product answering the query, and
+// one that drags the median somewhere the dealer cannot sell at.
+//
+// Size. Only capacities and inches, and only units written out — "in" as an abbreviation is the
+// English word far more often than it is a measurement. A unit is compared only when the query
+// states it too, so an unstated size never rejects anything.
+const SIZE_RE = /(\d+(?:\.\d+)?|\d+\s*\/\s*\d+)\s*-?\s*(gal(?:lon)?s?|quarts?|qts?|pints?|inch(?:es)?|")/gi;
+const UNIT_OF = u => {
+  const s = u.toLowerCase();
+  if (s.startsWith("gal")) return "gal";
+  if (s.startsWith("q")) return "qt";
+  if (s.startsWith("p")) return "pt";
+  return "in";
+};
+export function sizesIn(text) {
+  const out = new Map();
+  for (const m of String(text || "").matchAll(SIZE_RE)) {
+    const n = m[1].includes("/")
+      ? (([a, b]) => Number(a) / Number(b))(m[1].split("/"))
+      : Number(m[1]);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const u = UNIT_OF(m[2]);
+    if (!out.has(u)) out.set(u, new Set());
+    out.get(u).add(n);
+  }
+  return out;
+}
+
+// Parts and reproductions. A knob is not a radio and a replica is not the antique, but a title
+// that merely MENTIONS a part is usually fine — "bowl set with lids" is a good comp for a bowl
+// set. So a part word only rejects when the title leads with it or marks itself as the part
+// alone, and never when the dealer asked about that part in the first place.
+const PART = "lids?|knobs?|dials?|handles?|covers?|stoppers?|inserts?|liners?|cords?|grilles?|bezels?|faceplates?|decals?|badges?|emblems?|hinges?|latches|spouts?|shades?|drawers?|legs?|feet";
+const PART_ONLY = new RegExp(`\\b(?:${PART}|parts?)\\s+only\\b|\\bfor\\s+parts\\b|\\bparts?\\s*[/&]\\s*repair\\b`, "i");
+const PART_LEAD = new RegExp(`^\\s*(?:${PART})\\b`, "i");
+const PART_ANY = new RegExp(`\\b(?:${PART})\\b`, "i");
+const REPRO = /\b(?:repro|reproduction|replica|replacement|aftermarket)\b/i;
+
+export function contradictsSpec(query, title) {
+  const q = String(query || ""), t = String(title || "");
+
+  const qs = sizesIn(q), ts = sizesIn(t);
+  for (const [unit, qv] of qs) {
+    const tv = ts.get(unit);
+    // Disjoint values for a unit both sides named: a 3 gallon crock answering a 5 gallon query.
+    if (tv && ![...qv].some(v => tv.has(v))) return true;
+  }
+
+  if (REPRO.test(t) && !REPRO.test(q)) return true;
+  if (PART_ONLY.test(t) && !PART_ONLY.test(q)) return true;
+  if (PART_LEAD.test(t) && !PART_ANY.test(q)) return true;
+  return false;
+}
+
 async function ebaySearch(env, tok, query, limit, signal) {
   const u = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
   u.searchParams.set("q", String(query).slice(0, 120));
@@ -376,7 +433,9 @@ async function ebayActive(env, query, limit = 12) {
         condition: i.condition || "",
         note: `Listed now on eBay${i.condition ? ` — ${i.condition}` : ""}`,
         live: true,
-      })).filter(x => x.price > 0 && !contradictsGeneration(query, x.title));
+      })).filter(x => x.price > 0
+        && !contradictsGeneration(query, x.title)
+        && !contradictsSpec(query, x.title));
       if (out.length) { used = q; break; }
     }
     if (r && r.ok) {
