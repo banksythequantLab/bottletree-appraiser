@@ -1,6 +1,6 @@
 // Run:  node worker/tests/broaden_test.mjs
 // eBay's search is AND-ish: one unknown token returns nothing at all.
-import { broaden } from "../appraiser.js";
+import { broaden, cleanForEbay } from "../appraiser.js";
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -36,6 +36,15 @@ eq("null", broaden(null), []);
 // The original is never repeated back.
 eq("no duplicate of the original",
    broaden("32GB DDR4 SDRAM DIMM").every(q => q !== "32GB DDR4 SDRAM DIMM"), true);
+
+// "No" has two senses and cleanForEbay must tell them apart — and must not care about the period.
+eq("part no is dropped", cleanForEbay("32GB DDR4 DIMM Part No. C424TRB111"), "32GB DDR4 DIMM C424TRB111");
+eq("model no is dropped", cleanForEbay("Zenith radio Model No 6D030"), "Zenith radio 6D030");
+eq("Griswold No 8 keeps its number", cleanForEbay("Griswold No 8 skillet"), "Griswold No 8 skillet");
+eq("period does not change the result",
+   cleanForEbay("Griswold No. 8 skillet"), cleanForEbay("Griswold No 8 skillet"));
+eq("circa still dropped", cleanForEbay("Roseville Freesia vase circa 1945"), "Roseville Freesia vase 1945");
+eq("date range still dropped", cleanForEbay("Fiesta red plate 1936-1943"), "Fiesta red plate");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

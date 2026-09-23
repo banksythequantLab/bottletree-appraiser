@@ -281,16 +281,37 @@ const OPAQUE_TOKEN = /^(?=.*[a-z])(?=(?:.*\d){3,})[a-z0-9-]{6,}$/i;
 // A single year is kept — on an antique it is the most useful token there is.
 const EBAY_FILLER = /^(part|parts|model|mod|no|number|circa|ca|c|approx|approximately|unknown|n\/a|and|the|with|for)$/i;
 
+// "No" is filler in "part no C424TRB111" and it is the item's NAME in "Griswold No 8". Only the
+// first sense is dropped, and only when a part/model word introduces it. Stripping it outright
+// turned "Griswold No 8 skillet" into "Griswold 8 skillet", which is a materially worse search
+// for cast iron — the pans are listed by their number. The trailing period is normalised away
+// first so that "No." and "No" cannot take different paths through this function; before that
+// they did, and the same pan got two different eBay queries depending on the model's punctuation.
+const NUM_WORD = /^(?:no|num|number|nr)$/i;
+const INTRODUCES_NUM = /^(?:part|parts|model|mod|serial|catalog|catalogue|cat|item|stock)$/i;
+
 export function cleanForEbay(query) {
-  return String(query || "")
+  const toks = String(query || "")
     .split(/\s+/)
     .map(t => t.replace(/[^\p{L}\p{N}\-/&.]+/gu, ""))          // strip brackets, commas, dashes-as-punctuation
-    .filter(t => t
-      && !EBAY_FILLER.test(t)
-      && !/^\d{4}\s*[-–]\s*\d{4}$/.test(t)                      // "2015-2023" is a guess, not a search term
-      && !/^[-/&.]+$/.test(t))
-    .join(" ")
-    .trim();
+    .map(t => t.replace(/\.+$/, ""))                            // "No." and "No" must behave identically
+    .filter(Boolean);
+
+  const out = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (/^\d{4}\s*[-–]\s*\d{4}$/.test(t)) continue;             // "2015-2023" is a guess, not a search term
+    if (/^[-/&.]+$/.test(t)) continue;
+    if (NUM_WORD.test(t)) {
+      // Drop it only as part of "part no" / "model no"; keep the "Griswold No 8" sense.
+      if (INTRODUCES_NUM.test(toks[i - 1] || "")) continue;
+      out.push(t);
+      continue;
+    }
+    if (EBAY_FILLER.test(t)) continue;
+    out.push(t);
+  }
+  return out.join(" ").trim();
 }
 
 export function broaden(query) {
@@ -407,7 +428,7 @@ async function ebaySearch(env, tok, query, limit, signal) {
   return { r, u };
 }
 
-async function ebayActive(env, query, limit = 12) {
+export async function ebayActive(env, query, limit = 12) {
   _ebayFail = null;
   _ebayBroadened = null;
   if (!env.EBAY_CLIENT_ID || !env.EBAY_CLIENT_SECRET) {
@@ -441,7 +462,14 @@ async function ebayActive(env, query, limit = 12) {
     if (r && r.ok) {
       // Record when the exact description found nothing, so the dealer is told the prices are for
       // comparable items rather than for this one.
-      if (used && used !== String(query)) _ebayBroadened = used;
+      //
+      // Compare against `base`, not the raw query. cleanForEbay is normalisation — it strips
+      // punctuation and filler like "No." and "circa" — so "Griswold No 8 skillet" becomes
+      // "Griswold 8 skillet" and would have compared unequal to the raw query on the FIRST,
+      // un-broadened attempt. That put the "these are comparable items, not this one" warning
+      // on nearly every appraisal with a period or a "No." in it, which is how a real warning
+      // gets trained out of a dealer's attention. Only actual broadening should set it.
+      if (used && used !== base) _ebayBroadened = used;
       return out;
     }
     if (r && !r.ok) {
