@@ -302,6 +302,42 @@ export default {
         return J(await applyRevenueCatEvent(db, body.event));
       }
 
+      // ---------- eBay marketplace account deletion / closure notification ----------
+      // eBay disables a production keyset until the developer either implements this endpoint or
+      // declares they persist no eBay data. We do persist a little — up to six listing titles,
+      // prices and URLs end up in a stored appraisal — so the honest route is to implement it
+      // rather than sign a declaration that is arguably untrue.
+      //
+      // GET carries a challenge code and must be answered with
+      //   sha256(challengeCode + verificationToken + endpointUrl)
+      // hashed in exactly that order, hex encoded. The endpoint URL must match what is registered
+      // with eBay character for character, which is why it is configuration and not derived from
+      // the request — a proxy or a trailing slash would silently change the hash.
+      if (parts[1] === "ebay" && parts[2] === "deletion") {
+        if (!env.EBAY_VERIFY_TOKEN || !env.EBAY_DELETION_URL)
+          return J({ error: "deletion endpoint not configured" }, 503);
+        if (m === "GET") {
+          const challenge = url.searchParams.get("challenge_code");
+          if (!challenge) return J({ error: "challenge_code required" }, 400);
+          const digest = await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(challenge + env.EBAY_VERIFY_TOKEN + env.EBAY_DELETION_URL));
+          const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+          return J({ challengeResponse: hex });
+        }
+        if (m === "POST") {
+          // Nothing of the deleting user's is held here: we never ask for eBay user tokens and
+          // store no eBay account identifiers. Acknowledge so eBay does not retry, and leave a
+          // trace so a compliance question later has an answer.
+          const body = await readJson(request).catch(() => ({}));
+          console.log("ebay account deletion notification", JSON.stringify({
+            at: now(), notificationId: body?.notification?.notificationId || null,
+          }));
+          return new Response(null, { status: 204 });
+        }
+        return J({ error: "method not allowed" }, 405);
+      }
+
       // ---------- DEVICE (Jetson kiosk) intake: X-Device-Key instead of a session ----------
       if (parts[1] === "device" && parts[2] === "intake" && m === "POST") {
         const key = request.headers.get("x-device-key") || "";
