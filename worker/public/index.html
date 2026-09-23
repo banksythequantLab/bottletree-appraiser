@@ -21,7 +21,7 @@
 }}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased;padding-bottom:76px}
+body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased;padding-bottom:var(--bottom-pad,calc(76px + env(safe-area-inset-bottom)))}
 h1,h2,h3{font-family:"Fraunces",Georgia,serif;font-weight:600;margin:0}
 button{font-family:inherit;cursor:pointer}
 .wrap{max-width:620px;margin:0 auto;padding:0 14px}
@@ -57,7 +57,7 @@ input:focus,select:focus{outline:2px solid var(--cobalt);border-color:var(--coba
 .tabbar button .ic{font-size:1.15rem}
 .tabbar button.on{color:var(--green)}
 .hidden{display:none!important}
-.cartbar{position:fixed;left:0;right:0;bottom:70px;z-index:15;display:flex;justify-content:center;pointer-events:none}
+.cartbar{position:fixed;left:0;right:0;bottom:calc(70px + env(safe-area-inset-bottom));z-index:15;display:flex;justify-content:center;pointer-events:none}
 .cartbar .inner{pointer-events:auto;background:var(--green);color:#fff;border-radius:13px;box-shadow:var(--shadow);display:flex;align-items:center;gap:14px;padding:10px 14px;max-width:592px;width:calc(100% - 28px)}
 .cartbar .tot{font-family:"Fraunces",serif;font-weight:600;font-size:1.25rem;font-variant-numeric:tabular-nums}
 .cartbar .go{margin-left:auto;background:#fff;color:var(--green);border:0;border-radius:9px;padding:9px 16px;font-weight:800}
@@ -110,6 +110,6 @@ ul.ev{margin:4px 0 0;padding-left:18px;font-size:.88rem}ul.ev li{margin:3px 0}
 <div class="toast" id="toast"></div>
 <script src="/rc-sdk.js?v=0.4"></script>
 <script src="/billing.js?v=0.5"></script>
-<script src="/app.js?v=0.4"></script>
+<script src="/app.js?v=0.5"></script>
 </body>
 </html>

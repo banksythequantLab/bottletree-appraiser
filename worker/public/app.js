@@ -36,6 +36,28 @@ function planPill() {
   return `<a href="#" id="planPill" class="pill" style="text-decoration:none">${esc(BTBilling.summary())}${p.plan === "free" ? " · get more" : ""}</a>`;
 }
 
+// The tab bar is fixed to the bottom of the screen, so the page needs to end above it. The
+// padding used to be a flat 76px, which is wrong on any phone with a home indicator: the bar
+// itself is 6px + its buttons + 6px + env(safe-area-inset-bottom), and that overflowed the
+// allowance and sat on top of the last thing on the page. On the appraisal card the last thing
+// is the "Re-run appraisal" button, so the bar was covering a control nobody could reach.
+//
+// Measuring beats arithmetic here. Emoji line-height and the safe-area inset differ per device,
+// and the cart bar floats above the tab bar only on the cashier tab, so the clearance needed
+// changes as you move around the app.
+function syncBottomPad() {
+  // NOT offsetParent: it is null for every position:fixed element, visible or not, so using it
+  // here measured both bars as absent and applied no padding at all. Height is the honest test.
+  const visible = el => el && !el.classList.contains("hidden") && el.getBoundingClientRect().height > 0;
+  let pad = 0;
+  if (visible(tabs)) pad = tabs.getBoundingClientRect().height;
+  if (visible(cartbar)) pad = Math.max(pad, window.innerHeight - cartbar.getBoundingClientRect().top);
+  // A little air under the last element, and never less than the safe-area inset on its own.
+  document.body.style.setProperty("--bottom-pad", pad ? `${Math.ceil(pad) + 12}px` : "env(safe-area-inset-bottom)");
+}
+addEventListener("resize", syncBottomPad);
+addEventListener("orientationchange", syncBottomPad);
+
 function setChrome() {
   const inSale = state.view === "sale";
   tabs.classList.toggle("hidden", !inSale);
@@ -43,6 +65,7 @@ function setChrome() {
   ctx.textContent = inSale && state.detail ? state.detail.sale.name : "";
   cartbar.classList.toggle("hidden", !(inSale && state.tab === "cashier" && state.cart.size));
   [...tabs.children].forEach(b => b.classList.toggle("on", b.dataset.tab === state.tab));
+  syncBottomPad();
 }
 
 // ---------- Sign in with Google ----------
