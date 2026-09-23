@@ -406,10 +406,16 @@ export default {
         // rc_web_link is a RevenueCat Web Purchase Link. The web paywall appends /<user_id>, and the
         // RevenueCat webhook credits that same id — the identical path a Play purchase takes.
         const me = await db.prepare("SELECT email FROM users WHERE id=?").bind(userId).first();
+        // A way to pay with no way to be credited takes someone's money and gives nothing back.
+        // The Road Show deployment was exactly that: RC_WEB_LINK set, RC_WEBHOOK_SECRET absent, so
+        // every purchase would have 503'd at the webhook and never reached the buyer's account.
+        // Fail closed — offer no purchase route unless the webhook that credits it is configured.
+        const canCredit = !!env.RC_WEBHOOK_SECRET;
         return J({
           user_id: userId, email: me?.email || null,
-          rc_android_key: env.RC_ANDROID_KEY || null,
-          rc_web_link: env.RC_WEB_LINK || null,
+          rc_android_key: canCredit ? (env.RC_ANDROID_KEY || null) : null,
+          rc_web_link: canCredit ? (env.RC_WEB_LINK || null) : null,
+          billing_ready: canCredit,
           play_url: env.PLAY_URL || null,
           ...(await planFor(db, userId)),
         });
