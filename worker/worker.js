@@ -664,8 +664,17 @@ export default {
         if (parts[3] === "appraise" && m === "POST") {
           const photos = (await db.prepare("SELECT * FROM photos WHERE item_id=? ORDER BY sort, created_at").bind(iid).all()).results;
           if (!photos.length) return J({ error: "add at least one photo first" }, 400);
+          // Photographs alone are not enough. Four rolls of nickels stood on end were identified
+          // five different ways across five runs — shotgun shells once, a 2023 Silver Eagle set
+          // another time, which priced the lot at $260 when its silver alone was worth $585. One
+          // line from the dealer settles what no amount of pixel-reading can. Checked here and
+          // not only in the page, because the client is not the only way in.
+          const b = await readJson(request).catch(() => ({}));
+          if (!String(b.description ?? item.description ?? "").trim() &&
+              !String(b.markings ?? item.markings ?? "").trim())
+            return J({ error: "Tell us what it is, even roughly — a photo on its own is identified wrong too often.",
+                       needs_description: true }, 400);
           if (!env.APPRAISER_URL && !env.NEBIUS_API_KEY) return J({ error: "appraiser not configured" }, 503);
-          const b = await readJson(request);
           if (b.description !== undefined || b.markings !== undefined) {
             await db.prepare("UPDATE items SET description=COALESCE(?,description), markings=COALESCE(?,markings) WHERE id=?")
               .bind(b.description ?? null, b.markings ?? null, iid).run();

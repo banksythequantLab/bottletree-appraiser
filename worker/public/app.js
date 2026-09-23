@@ -447,9 +447,12 @@ function renderCapture() {
     shots[kind] = f;
     const ph = $("#ph-" + kind); ph.innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">`;
   };
-  app.querySelectorAll(".shot input").forEach(inp => inp.onchange = () => {
-    const kind = inp.closest(".shot").dataset.kind, f = inp.files[0]; if (!f) return;
-    setShot(kind, f);
+  app.querySelectorAll(".shot input").forEach(inp => inp.onchange = async () => {
+    const kind = inp.closest(".shot").dataset.kind, f = inp.files[0];
+    inp.value = "";
+    if (!f) return;
+    const ok = await acceptPhoto(f, kind === "marks" ? "marks photo" : "photo");
+    if (ok) setShot(kind, ok);
   });
   // Tapping a tile opens the live viewfinder where we can; "choose file" is always there as a fallback.
   app.querySelectorAll(".shot").forEach(tile => {
@@ -458,20 +461,37 @@ function renderCapture() {
     tile.onclick = async () => {
       if (!canUseCamera()) return inp.click();
       const f = await openCamera(s ? s.label + " — " + s.hint : "Take a photo");
-      if (f) setShot(kind, f);
+      if (!f) return;
+      const ok = await acceptPhoto(f, kind === "marks" ? "marks photo" : "photo");
+      if (ok) setShot(kind, ok);
     };
   });
   const bumpMore = () => $("#moreCount").textContent = more.length ? more.length + " extra" : "";
-  $("#moreShots").onchange = e => { more.push(...e.target.files); bumpMore(); };
+  $("#moreShots").onchange = async e => {
+    const picked = [...e.target.files]; e.target.value = "";
+    for (const f of picked) { const ok = await acceptPhoto(f); if (ok) more.push(ok); }
+    bumpMore();
+  };
   if (canUseCamera()) {
     const mc = $("#moreCam"); mc.style.display = "inline-block"; mc.style.marginRight = "8px";
-    mc.onclick = async () => { const f = await openCamera("Another photo"); if (f) { more.push(f); bumpMore(); } };
+    mc.onclick = async () => {
+      const f = await openCamera("Another photo"); if (!f) return;
+      const ok = await acceptPhoto(f); if (ok) { more.push(ok); bumpMore(); }
+    };
   }
   $("#cCancel").onclick = renderItems;
   $("#cGo").onclick = async () => {
     const files = [...Object.entries(shots).map(([k, f]) => ({ kind: k, f })), ...more.map(f => ({ kind: "other", f }))];
     if (!files.length) return toast("Take at least one photo");
     const description = $("#cDesc").value.trim(), markings = $("#cMarks").value.trim(), seller_id = $("#cSeller").value;
+    // Photographs alone are not enough, and the dealer standing in front of the item knows more
+    // than any camera does. Four rolls of nickels shot end-on were read as shotgun shells; the
+    // words "four rolls of war nickels" would have settled it in one line.
+    if (!description && !markings) {
+      $("#cDesc").focus();
+      $("#cDesc").style.borderColor = "var(--rust)";
+      return toast("Tell us what it is, even roughly — the photo alone gets it wrong too often.");
+    }
     $("#cGo").disabled = true; $("#cGo").textContent = "Uploading…";
     try {
       const { id } = await api("/sales/" + state.saleId + "/items", { method: "POST", body: JSON.stringify({ name: "New item", description, markings, seller_id }) });
@@ -486,6 +506,54 @@ function renderCapture() {
     } catch (e) { toast(e.message); $("#cGo").disabled = false; $("#cGo").textContent = "✨ Identify & price"; }
   };
 }
+// How sharp a photo is, as the variance of its Laplacian: high where edges are crisp, near zero
+// where everything is a smudge. Measured on a fixed 320px width so the number means the same
+// thing for every camera.
+//
+// Calibrated on two real items in this account rather than a number from a blog post. Four rolls
+// of nickels stood on end, photographed slightly out of focus, scored 167 and 229 — that item was
+// appraised five times and identified five different ways, once as shotgun shells, once as a 2023
+// Silver Eagle set that priced it at $260 when its silver alone was worth $585. A sharp photo of
+// a memory kit scored 2644 and 2242 and was identified correctly every single time. An order of
+// magnitude apart. BLURRY sits well clear of both, because refusing a usable photo costs a dealer
+// more than accepting a marginal one.
+// app.js is a classic script, not a module — no export here, or the whole file fails to parse.
+const BLURRY = 300, SOFT = 700;
+async function sharpness(file) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const w = 320, h = Math.max(1, Math.round(bmp.height * w / bmp.width));
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    const d = c.getContext("2d").getImageData(0, 0, w, h).data;
+    const g = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+    let n = 0, s = 0, s2 = 0;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const L = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w];
+      n++; s += L; s2 += L * L;
+    }
+    if (!n) return null;
+    const mean = s / n;
+    return Math.round(s2 / n - mean * mean);
+  } catch { return null; }   // can't measure it — never block a photo on that
+}
+
+// Hand a blurry photo back before it is uploaded. The dealer is standing in front of the item
+// with the camera in their hand; that is the only moment a retake is cheap.
+async function acceptPhoto(file, what = "photo") {
+  const s = await sharpness(file);
+  if (s === null || s >= SOFT) return file;
+  if (s >= BLURRY) { toast(`That ${what} is a little soft — a sharper one reads better.`); return file; }
+  const again = confirm(
+    `That ${what} came out blurry.\n\n` +
+    `The appraiser reads the picture, and a blurry one is where it guesses wrong — ` +
+    `one out-of-focus shot here has been identified five different ways.\n\n` +
+    `OK to take it again, or Cancel to use it anyway.`);
+  return again ? null : file;
+}
+
 // downscale to <=1600px JPEG so uploads are quick on cell data
 async function shrink(file, max = 1600) {
   if (!file.type.startsWith("image/") || file.type === "image/heic") return file;
@@ -524,6 +592,11 @@ async function renderItemDetail(id) {
         <div class="kpi"><div class="n">$${Math.round(pr.low)}–$${Math.round(pr.high)}</div><div class="l">Price range</div></div>
         <div class="kpi"><div class="n">$${Math.round(pr.suggested_retail)}</div><div class="l">Suggested · floor $${Math.round(pr.floor)}</div></div>
       </div>
+      ${r.confidence < 0.55 ? `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--rust);background:var(--bg);font-size:.82rem">
+          <b>Not sure what this is</b> — ${Math.round(r.confidence * 100)}% confident, and the price below assumes the identification is right.
+          <div class="muted" style="margin-top:3px">${esc((r.questions_for_dealer || [])[0] || "A sharper photo of the marks, or a line about what it is, would settle it.")}</div>
+          <div style="margin-top:5px"><button class="btn sec sm" id="reappraise2">↻ Re-run after adding detail</button></div>
+        </div>` : ""}
       ${r.lot ? `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--amber,#b8860b);background:var(--bg);font-size:.82rem">
           <b>$${r.lot.unit_retail} each × ${r.lot.count} pieces</b> — $${r.lot.unit_low}–$${r.lot.unit_high} per piece
           <div class="muted" style="margin-top:3px">Counted because ${esc(r.lot.how)}. The totals above are the whole lot; sold one at a time the per-piece price is what matters — check that it looks right.</div>
@@ -573,8 +646,18 @@ async function renderItemDetail(id) {
   if ($("#saveDraft")) $("#saveDraft").onclick = () => publishAs(item.listing_status === "live" ? "live" : "hidden");
   if ($("#unlist")) $("#unlist").onclick = () => publishAs("hidden");
   if ($("#viewLive")) { const me = await api("/auth/me"); $("#viewLive").href = "/shop/" + me.shop_slug + "/item/" + id; }
-  const rerun = async () => { await api("/items/" + id + "/appraise", { method: "POST", body: JSON.stringify(payload()) }); renderItemDetail(id); };
+  const rerun = async () => {
+    try { await api("/items/" + id + "/appraise", { method: "POST", body: JSON.stringify(payload()) }); }
+    catch (e) {
+      // The appraiser will not run on photographs alone. Put the cursor where the answer goes
+      // rather than just refusing.
+      if (e.needs_description) { const d = $("#lDesc") || $("#iDesc"); if (d) { d.focus(); d.scrollIntoView({ block: "center" }); } }
+      return toast(e.message);
+    }
+    renderItemDetail(id);
+  };
   if ($("#reappraise")) $("#reappraise").onclick = rerun;
+  if ($("#reappraise2")) $("#reappraise2").onclick = rerun;
   if ($("#retry")) $("#retry").onclick = rerun;
   if (pending) pollT = setTimeout(() => renderItemDetail(id), 4000);
 }

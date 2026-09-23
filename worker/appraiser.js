@@ -57,6 +57,11 @@ FIELD GUIDE (do not copy these sentences into the JSON):
 - listing.title: <= 80 chars, searchable (maker, period, type). listing.description: 2-3 short paragraphs for a shop website.
 - listing.condition_grade: one of Excellent, Very good, Good, Fair, Poor, As-is.
 - questions_for_dealer: 1-2 things that would most change the appraisal if known.
+- If the photographs do not settle what the item is — out of focus, too far away, the wrong face of
+  the object, a detail you cannot read — say so plainly in confidence AND make the FIRST entry in
+  questions_for_dealer the single specific photograph that would settle it: which face, which mark,
+  from how close. "A close, sharp photo of the stamp on the base" is useful; "more photos" is not.
+  Trust what the dealer wrote over what you think you see: they are holding the object.
 
 EXAMPLE of a filled answer for a different item (format only):
 {"identification":{"name":"Red Wing 3-gallon stoneware crock","category":"Stoneware","maker":"Red Wing Union Stoneware Co.","origin":"Red Wing, Minnesota, USA","period":"c. 1915-1930","style":"Utilitarian salt-glaze"},"confidence":0.85,"evidence":["Red Wing oval stamp on face - factory-marked, post-1906 union period","Cobalt '3' capacity mark matches 3-gallon body size"],"transcribed_text":["RED WING UNION STONEWARE CO.","3"],"price_range":{"low":90,"high":160,"suggested_retail":135,"floor":90,"currency":"USD","basis":"Common marked Red Wing size; hairline would drop it to the low end."},"listing":{"title":"Red Wing 3-Gallon Stoneware Crock, Union Stoneware Co., c. 1920","description":"A classic Red Wing 3-gallon crock with the oval Union Stoneware stamp and a cobalt 3. Sturdy salt-glazed body with the warm patina these pieces earn in a century of farmhouse use.\\n\\nRim and base are sound. A handsome piece for a kitchen counter, utensil storage or a farmhouse display.","tags":["red wing","stoneware","crock","farmhouse"],"condition_grade":"Very good"},"questions_for_dealer":["Any hairlines or chips on the rim or base?"]}`;
@@ -1151,6 +1156,19 @@ export async function appraise(env, req) {
         `searched using your words rather than its own — check the item name is right.`);
     }
   }
+  // A low-confidence identification is the most expensive thing this tool produces, because the
+  // melt check and the comps search both price whatever the identification says the item is. Five
+  // runs on one out-of-focus photograph gave five different items and prices from $260 to $850 on
+  // the same lot. When the model is unsure, the dealer should know before the number persuades
+  // them, and should be told what would fix it.
+  const conf = clamp(first.confidence ?? 0.5);
+  if (conf < 0.55) {
+    const ask = clean(strs(first.questions_for_dealer))[0];
+    warnings.push(`the identification is uncertain (confidence ${Math.round(conf * 100)}%), and everything ` +
+      `below is priced as if it were right. ${ask ? ask.replace(/\?$/, "") + " — that would settle it." :
+      "A sharper photo of the marks, or a line about what it is, would settle it."}`);
+  }
+
   if (String(req.markings || "").trim() && !ident.maker.trim()) {
     const maker = makerFromMarks(req.markings);
     if (maker) ident.maker = maker;
