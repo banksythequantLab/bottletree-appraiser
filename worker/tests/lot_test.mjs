@@ -62,5 +62,24 @@ eq("bare count is not detected (documented gap)", n("8 oak dining chairs", ""), 
 // The division must be stated, not assumed.
 eq("explains itself", detectLot("256 gb total", "32gb 2rx4").how, "256GB total divided by 32GB per piece");
 
+// "N containers", the way a dealer actually writes it. Production, 2026-09-23: "These are 4
+// rolls of world war 2 silver nickels" detected no lot, so the model priced the group as one
+// object and the re-pricer discarded eight live single-roll listings at $130-$200 as "single
+// roll, not four rolls" — the best evidence available for the item.
+eq("4 rolls", detectLot("These are 4 rolls of world war 2 silver nickels", ""), { count: 4, how: "the dealer stated the count" });
+eq("2 boxes", detectLot("2 boxes of Fiesta plates", ""), { count: 2, how: "the dealer stated the count" });
+eq("3 bags", detectLot("3 bags of marbles from the attic", ""), { count: 3, how: "the dealer stated the count" });
+eq("12 sleeves", detectLot("12 sleeves of wheat pennies", ""), { count: 12, how: "the dealer stated the count" });
+eq("2 sets of shakers is two sets", detectLot("2 sets of salt and pepper shakers", ""), { count: 2, how: "the dealer stated the count" });
+// A year must never be read as a count. The three-digit cap means "1943 rolls" matches nothing
+// at all rather than picking "194" or "943" out of the middle of the year.
+eq("a year is not a count", detectLot("1943 rolls of war nickels", ""), null);
+eq("a tube radio is still one radio", detectLot("1940s 5 tube radio", ""), null);
+eq("a single roll is not a lot", detectLot("Roll of war nickels", ""), null);
+eq("no digit, no lot", detectLot("rolls of war nickels", ""), null);
+// The matched-set guard still holds.
+eq("3 piece carving set is one object", detectLot("3 piece carving set", ""), null);
+eq("4 piece tea service is one object", detectLot("4 piece tea service, silver plate", ""), null);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

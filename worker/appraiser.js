@@ -867,7 +867,26 @@ const CAP = { mb: 1 / 1024, gb: 1, tb: 1024 };
 // "of" is mandatory after lot/box/set. Without it, "Lot 14" on an estate-sale tag is a lot
 // NUMBER, not a quantity, and multiplying a single item's price by fourteen is the worst thing
 // this code could do. Written-out small counts are common on tags and cost nothing to read.
-const COUNT_RE = /(?:\b(?:lot|set|box|pack|roll|group|case|tray|bag)\s+of\s+(\d{1,3})\b)|(?:\b(?:qty|quantity)\s*[:#]?\s*(\d{1,3})\b)|(?:\b(\d{1,3})\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count|ct)\b)/i;
+// Dealers write the container count both ways round, and only one of them was being read.
+// "4 rolls of war nickels" is how anyone would actually say it, and it was missed while "roll of
+// 4" was caught. That miss cost real accuracy: with no lot detected the model prices the whole
+// group as one object, and eight live listings of SINGLE rolls at $130-$200 — the best evidence
+// available for that item — were rejected by the re-pricer as "single roll, not four rolls".
+// Detect the lot and the same listings become the right comparables, because the model is then
+// asked to price one roll. Four times the ~$140 median is $560, against a melt floor of $586:
+// two independent routes to the same number.
+//
+// Years cannot be read as counts here: the count is capped at three digits, so "1943 rolls"
+// cannot match. A matched set ("4 piece tea service") is still excluded below.
+// Deliberately NOT here: "tube". A 1940s 5 tube radio is one radio, and counting its valves as a
+// lot would have quintupled the price of every tube radio in the catalogue. The existing suite
+// caught that the moment it was added, which is the whole argument for keeping these tests.
+const CONTAINER = "lots?|sets?|boxes|packs?|rolls?|groups?|cases|trays?|bags|sleeves?|crates?|cartons?";
+const COUNT_RE = new RegExp(
+  `(?:\\b(?:lot|set|box|pack|roll|group|case|tray|bag)\\s+of\\s+(\\d{1,3})\\b)` +
+  `|(?:\\b(?:qty|quantity)\\s*[:#]?\\s*(\\d{1,3})\\b)` +
+  `|(?:\\b(\\d{1,3})\\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count|ct)\\b)` +
+  `|(?:\\b(\\d{1,3})\\s*(?:${CONTAINER})\\b)`, "i");
 const WORD_COUNT = { pair: 2, brace: 2, dozen: 12, "half dozen": 6, "half-dozen": 6 };
 const WORD_COUNT_RE = /\b(half[- ]dozen|dozen|pair|brace)\s+of\s+|\b(half[- ]dozen|dozen|pair|brace)\b/i;
 
@@ -898,9 +917,10 @@ export function detectLot(description, markings) {
   const both = `${description || ""} ${markings || ""}`;
   const m = COUNT_RE.exec(both);
   if (m) {
-    const n = Number(m[1] || m[2] || m[3]);
+    const n = Number(m[1] || m[2] || m[3] || m[4]);
     // m[3] is the "N pieces" branch — the only one that can be describing the parts of a single
-    // matched object rather than a quantity of separate ones.
+    // matched object rather than a quantity of separate ones. m[4] is "N rolls", "N boxes": the
+    // container is named, so there is no such ambiguity.
     const fromPieces = m[3] !== undefined;
     if (n >= 2 && n <= 500 && !(fromPieces && MATCHED_SET.test(both)))
       return { count: n, how: "the dealer stated the count" };
@@ -1362,6 +1382,21 @@ export async function appraise(env, req) {
     } catch (e) { warnings.push(`melt check failed: ${e.message}`); }
   } else {
     warnings.push("live metal prices unavailable; no melt floor applied");
+  }
+
+  // The per-piece figures were worked out from the price BEFORE the melt floor was applied, and
+  // the floor moves the lot total without moving them. On a 4-roll lot of war nickels that put
+  // "$68 each × 4 pieces" on the card directly above "4 comparables at $125-$135" — two numbers
+  // that cannot both be true, sitting an inch apart. The floor is arithmetic on the whole lot, so
+  // it divides back down the same way.
+  if (lot && lot.count > 1 && price.suggested_retail > 0) {
+    const before = lot.unit_retail;
+    lot.unit_low = Math.round(price.low / lot.count);
+    lot.unit_high = Math.round(price.high / lot.count);
+    lot.unit_retail = Math.round(price.suggested_retail / lot.count);
+    if (before && lot.unit_retail >= before * 1.5)
+      warnings.push(`per-piece price raised from $${before} to $${lot.unit_retail} so the ${lot.count} ` +
+        `pieces add up to the lot total above.`);
   }
 
   // A statement of fact the dealer can check, rather than an opinion they have to trust.
