@@ -579,6 +579,9 @@ async function renderItemDetail(id) {
   const pending = appraisal && appraisal.status === "pending";
   const pr = r && r.price_range;
   const conf = r ? Math.round(r.confidence * 100) : 0;
+  // When the identification is contested there is no headline number, so there is nothing to
+  // anchor on and nothing to pre-fill into the price box either.
+  const nc = r && r.needs_clarification;
   app.innerHTML = `
     <button class="back" id="toItems" style="padding:8px 0">‹ Items</button>
     <div class="thumbs">${photos.map(p => `<img src="${esc(p.url)}" alt="${esc(p.kind)}" title="${esc(p.kind)}">`).join("")}</div>
@@ -588,15 +591,19 @@ async function renderItemDetail(id) {
     <div class="card">
       <div class="row" style="justify-content:space-between;align-items:flex-start"><h3 style="font-size:1.15rem">${esc(r.identification.name)}</h3><span class="pill" title="confidence">${conf}% sure</span></div>
       <div class="muted" style="font-size:.85rem">${[r.identification.maker, r.identification.period, r.identification.origin, r.identification.style].filter(Boolean).map(esc).join(" · ")}</div>
-      <div class="kpis" style="margin:12px 0">
+      ${nc ? `<div style="margin:12px 0;padding:10px 12px;border:1px solid var(--rust);border-radius:10px;background:var(--bg)">
+          <b style="font-size:.95rem">No price yet — ${esc(nc.reason)}.</b>
+          ${nc.candidates ? `<div style="margin-top:6px;font-size:.85rem">It could be <b>${esc(nc.candidates[0])}</b> or <b>${esc(nc.candidates[1])}</b>. Those are different items at different prices, so a number here would be a guess dressed up as an estimate.</div>` : ""}
+          <div style="margin-top:6px;font-size:.85rem"><b>${esc(nc.question)}</b></div>
+          <textarea id="clarify" rows="2" style="margin-top:6px" placeholder="Answer here — a few words is enough"></textarea>
+          <div style="height:6px"></div>
+          <button class="btn sm" id="clarifyGo">Answer &amp; price it</button>
+          ${r.melt && r.melt.applied ? `<div class="muted" style="margin-top:8px;font-size:.8rem">What we do know: it holds <b>$${r.melt.value}</b> of ${esc(r.melt.metal)} at today's spot — but that figure assumes the identification too.</div>` : ""}
+        </div>`
+      : `<div class="kpis" style="margin:12px 0">
         <div class="kpi"><div class="n">$${Math.round(pr.low)}–$${Math.round(pr.high)}</div><div class="l">Price range</div></div>
         <div class="kpi"><div class="n">$${Math.round(pr.suggested_retail)}</div><div class="l">Suggested · floor $${Math.round(pr.floor)}</div></div>
-      </div>
-      ${r.confidence < 0.55 ? `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--rust);background:var(--bg);font-size:.82rem">
-          <b>Not sure what this is</b> — ${Math.round(r.confidence * 100)}% confident, and the price below assumes the identification is right.
-          <div class="muted" style="margin-top:3px">${esc((r.questions_for_dealer || [])[0] || "A sharper photo of the marks, or a line about what it is, would settle it.")}</div>
-          <div style="margin-top:5px"><button class="btn sec sm" id="reappraise2">↻ Re-run after adding detail</button></div>
-        </div>` : ""}
+      </div>`}
       ${r.lot ? `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--amber,#b8860b);background:var(--bg);font-size:.82rem">
           <b>$${r.lot.unit_retail} each × ${r.lot.count} pieces</b> — $${r.lot.unit_low}–$${r.lot.unit_high} per piece
           <div class="muted" style="margin-top:3px">Counted because ${esc(r.lot.how)}. The totals above are the whole lot; sold one at a time the per-piece price is what matters — check that it looks right.</div>
@@ -626,7 +633,7 @@ async function renderItemDetail(id) {
     <div class="card">
       <label>Listing title</label><input id="lTitle" value="${esc(item.ai_title || item.name)}">
       <div style="height:8px"></div>
-      <label>Price</label><input id="lPrice" inputmode="decimal" value="${item.price_cents ? (item.price_cents / 100).toFixed(2) : (pr ? Math.round(pr.suggested_retail).toFixed(2) : "")}" placeholder="$0.00">
+      <label>Price</label><input id="lPrice" inputmode="decimal" value="${item.price_cents ? (item.price_cents / 100).toFixed(2) : (pr && !nc ? Math.round(pr.suggested_retail).toFixed(2) : "")}" placeholder="$0.00">
       <div style="height:8px"></div>
       <label>Description</label><textarea id="lDesc" rows="6">${esc(item.ai_description || item.description || "")}</textarea>
       <div style="height:12px"></div>
@@ -657,7 +664,16 @@ async function renderItemDetail(id) {
     renderItemDetail(id);
   };
   if ($("#reappraise")) $("#reappraise").onclick = rerun;
-  if ($("#reappraise2")) $("#reappraise2").onclick = rerun;
+  // The clarification answer is appended to the description rather than replacing it, so the
+  // dealer's earlier words are not lost by answering a question about them.
+  if ($("#clarifyGo")) $("#clarifyGo").onclick = async () => {
+    const a = $("#clarify").value.trim();
+    if (!a) { $("#clarify").focus(); return toast("A few words is enough — what is it?"); }
+    const merged = [$("#lDesc").value.trim(), a].filter(Boolean).join(". ");
+    $("#lDesc").value = merged;
+    $("#clarifyGo").disabled = true; $("#clarifyGo").textContent = "Pricing…";
+    await rerun();
+  };
   if ($("#retry")) $("#retry").onclick = rerun;
   if (pending) pollT = setTimeout(() => renderItemDetail(id), 4000);
 }

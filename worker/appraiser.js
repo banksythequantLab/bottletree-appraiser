@@ -1136,6 +1136,7 @@ export async function appraise(env, req) {
   // The model's own name is kept for searching even when the dealer's wording wins the display.
   // "256 gb total" is what the dealer typed; "SK Hynix 32GB DDR4-2400 ECC RDIMM" is what finds comps.
   let searchName = ident.name;
+  let idConflict = null;
   if (ignoresDealer(ident.name, req.description)) {
     // ignoresDealer means the model's name shares NOT ONE significant word with what the dealer
     // wrote. That covers two very different situations, and the difference is how much the dealer
@@ -1146,6 +1147,7 @@ export async function appraise(env, req) {
     // shotgun-ammo listings for a box of coins. The dealer is holding the thing; when they have
     // described it in substance, their words win the search too, not just the display.
     const said = words(dealerName(req.description));
+    idConflict = { model: ident.name, dealer: dealerName(req.description) };
     warnings.push(`model named it '${ident.name}'; using the dealer's description for the name instead`);
     ident.name = dealerName(req.description);
     if (said.size >= 3) {
@@ -1374,6 +1376,26 @@ export async function appraise(env, req) {
   return {
     melt,
     lot,
+    // The identification gate. A dealer reads the digits and skips the warning above them, so a
+    // number carrying a caveat is worse than no number at all: run 4 of the nickel lot printed
+    // "$260, low confidence" and $260 is what a dealer would have taken, for silver worth $585.
+    //
+    // The gate keys on disagreement with the DEALER, not on agreement between melt and comps.
+    // Those two are not independent evidence — the comps query is built from the identification,
+    // so a wrong name produces a search that produces a pool agreeing with the wrong name. The
+    // numbers prove it: run 4, the disaster, had melt $260 against a comps median of $289 and
+    // would have passed any coherence check; run 2, which was correct, had melt $585 against a
+    // comps median of $159 and would have failed one. Coherence scoring inverts on both. The
+    // dealer's own words are the only signal here that is not downstream of the identification,
+    // because they are holding the object.
+    needs_clarification: (idConflict || clamp(first.confidence ?? 0.5) < 0.55) ? {
+      reason: idConflict
+        ? "your description and the photographs disagree about what this is"
+        : `the photographs do not settle what this is (${Math.round(clamp(first.confidence ?? 0.5) * 100)}% confident)`,
+      candidates: idConflict ? [idConflict.model, idConflict.dealer] : null,
+      question: clean(strs(first.questions_for_dealer))[0] ||
+        "What is it, in a few words — and is there any writing or stamp on it?",
+    } : null,
     // The judged market is the headline; the unjudged pool stays available rather than being
     // thrown away, so nothing is hidden from a dealer who wants to see everything eBay returned.
     market: marketShown,
