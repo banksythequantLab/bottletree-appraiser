@@ -543,6 +543,21 @@ export async function ebayActive(env, query, limit = 12) {
   finally { clearTimeout(t); }
 }
 
+// Which of the live eBay listings survived the model's relevance judgement. The model returns the
+// comparables it kept, sometimes with the title tidied up, so match on URL first and fall back to
+// the title — a truncated or lightly reworded title still matches on its opening.
+const normTitle = s => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+export function keptLive(live, comps) {
+  if (!live || !live.length || !comps || !comps.length) return [];
+  const urls = new Set(comps.map(c => String(c.url || "")).filter(Boolean));
+  const titles = comps.map(c => normTitle(c.title)).filter(t => t.length >= 12);
+  return live.filter(l => {
+    if (l.url && urls.has(String(l.url))) return true;
+    const lt = normTitle(l.title);
+    return titles.some(t => t === lt || lt.startsWith(t.slice(0, 40)) || t.startsWith(lt.slice(0, 40)));
+  });
+}
+
 // A handful of asking prices, summarised the way a dealer would say it out loud:
 // "three listed right now, $150 to $189". The median is the honest middle; the count is the caveat.
 function summarise(listings) {
@@ -776,6 +791,21 @@ export const dealerName = d => {
   const head = String(d || "").trim().split(/[.;,\n]/)[0];
   return head.split(/\s+/).slice(0, 10).join(" ").trim() || String(d || "").trim().slice(0, 80);
 };
+// A dealer writes a sentence, not a search term: "These are 4 rolls of world war 2 silver
+// nickels". Handed to eBay whole, and then shortened by broaden(), that became "United States
+// Mint These" and returned rolls of postage stamps. Reduce it to the words that identify the
+// thing, keeping their order and any numbers — "4 rolls world war 2 silver nickels".
+const PHRASE_DROP = new Set(["these","this","that","those","there","here","it","its","they","them",
+  "i","we","my","our","your","am","are","is","was","were","be","been","being","have","has","had",
+  "got","a","an","the","of","and","or","with","from","in","on","for","to","some","just","really",
+  "look","looks","like","think","believe","says","said","said's","about","maybe","probably"]);
+export function searchPhrase(s) {
+  return String(s || "").split(/\s+/)
+    .map(t => t.replace(/^[^\p{L}\p{N}]+/gu, "").replace(/[^\p{L}\p{N}%"'.-]+$/gu, ""))
+    .filter(t => t && !PHRASE_DROP.has(t.toLowerCase()))
+    .slice(0, 10).join(" ").trim();
+}
+
 export function ignoresDealer(name, description) {
   const dw = words(dealerName(description));
   if (!dw.size || !String(name || "").trim()) return false;
@@ -853,9 +883,14 @@ export function detectLot(description, markings) {
   return null;
 }
 
+// The name leads, then the maker. broaden() shortens a query from the end, so whatever comes
+// first survives every broadening step — and that has to be what the item IS. With the maker
+// first, a wartime-nickel query broadened to "United States Mint These" and found postage
+// stamps: three steps of broadening had thrown away every word that named the object and kept
+// only the mint. A maker is context for an identification, never a substitute for one.
 function compsQuery(ident) {
   const out = [], seen = new Set();
-  for (const chunk of [ident.maker, ident.name, ident.period]) {
+  for (const chunk of [ident.name, ident.maker, ident.period]) {
     for (const w of String(chunk || "").replace(/,/g, " ").split(/\s+/)) {
       const k = w.toLowerCase().replace(/\.+$/, "");
       if (!k || ["c", "ca", "circa", "usa", "co", "inc"].includes(k) || seen.has(k)) continue;
@@ -1074,7 +1109,9 @@ export async function appraise(env, req) {
     warnings.push(`model named it '${ident.name}'; using the dealer's description for the name instead`);
     ident.name = dealerName(req.description);
     if (said.size >= 3) {
-      searchName = ident.name;
+      // The dealer's words, reduced to a search term. Handing over the raw sentence is what
+      // produced "United States Mint These" and a page of postage stamps.
+      searchName = searchPhrase(ident.name);
       warnings.push(`the model's identification did not match your description, so comparables were ` +
         `searched using your words rather than its own — check the item name is right.`);
     }
@@ -1115,6 +1152,9 @@ export async function appraise(env, req) {
   // Only the Browse API produces a market range. See the note above searchComps for why search
   // hits do not get one.
   const market = (live && live.length) ? summarise(live) : null;
+  // What the dealer is shown. Narrowed to the listings the model judged comparable once it has
+  // said which those are; until then it is the whole pool.
+  let marketShown = market;
   // Keys configured but no listings back means the feed is broken, not that eBay is empty.
   const ebayWhy = ebayFailure();
   if (ebayWhy && ebayWhy !== "no eBay API keys are configured")
@@ -1163,6 +1203,19 @@ export async function appraise(env, req) {
           `comparable — the rest were set aside as different items (${rejected.slice(0, 3).map(r => r.why).filter(Boolean).join("; ")}). ` +
           `A price built on ${comparables.length} listing${comparables.length === 1 ? "" : "s"} is thinner than the count suggests.`);
     } catch (e) { warnings.push(`comps re-pricing failed: ${e.message}`); }
+
+    // The market line is built from every live listing, because the model needs the whole pool in
+    // front of it before it can judge any of it. But what the dealer READS has to agree with the
+    // price printed beside it. On a 4-roll lot of war nickels the pool was $90-$730 median $159 —
+    // mostly single rolls — sitting under a $643 price. A dealer seeing that reasonably concludes
+    // the price is wrong. Once the model has said which listings are the same item, the headline
+    // is rebuilt from those.
+    const kept = keptLive(live, comparables);
+    if (kept.length) marketShown = summarise(kept);
+    else if (!comparables.length && rejected.length) marketShown = null;
+    if (market && !marketShown)
+      warnings.push(`all ${market.count} eBay listings found were judged to be different items, so ` +
+        `there is no live price range for this one — the estimate is not anchored to today's market.`);
     // Relevant listings with no numbers on them cannot correct anything. Search returns page
     // descriptions, and a marketplace's description often names the item without ever quoting a
     // price — so the re-pricer reads four genuinely comparable listings, finds nothing to price
@@ -1257,19 +1310,30 @@ export async function appraise(env, req) {
   }
 
   // A statement of fact the dealer can check, rather than an opinion they have to trust.
-  if (market) {
-    price.basis = (price.basis + ` ${market.count} listed on eBay right now at ` +
-      `$${market.low}-$${market.high} (median $${market.median}) — asking prices, not sold.`).trim();
+  if (marketShown) {
+    const m = marketShown;
+    price.basis = (price.basis + (m.count === 1
+      ? ` One comparable listed on eBay right now at $${m.low} — an asking price, not a sale.`
+      : ` ${m.count} comparable${m.count === 1 ? "" : "s"} listed on eBay right now at ` +
+        `$${m.low}-$${m.high} (median $${m.median}) — asking prices, not sold.`)).trim();
   }
 
   return {
     melt,
     lot,
-    market,
+    // The judged market is the headline; the unjudged pool stays available rather than being
+    // thrown away, so nothing is hidden from a dealer who wants to see everything eBay returned.
+    market: marketShown,
+    market_all: market && marketShown && market.count !== marketShown.count ? market : null,
     // What the model set aside and why. A dealer who disagrees with a price should be able to see
     // which listings were kept out of it — including the ones it was wrong to exclude.
     rejected_comparables: rejected.slice(0, 8),
-    live_listings: (live || []).slice(0, 6),
+    // Comparable listings first: the ones the price actually rests on.
+    live_listings: (() => {
+      const k = keptLive(live, comparables);
+      const ku = new Set(k.map(l => l.url));
+      return [...k, ...(live || []).filter(l => !ku.has(l.url))].slice(0, 6);
+    })(),
     item_id: req.item_id,
     identification: ident,
     confidence: clamp(first.confidence ?? 0.5),

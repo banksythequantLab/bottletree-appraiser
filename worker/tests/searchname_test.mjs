@@ -1,7 +1,7 @@
 // Run:  node worker/tests/searchname_test.mjs
 // Which name the comps search uses when the model's identification shares no words with the
 // dealer's description. Both cases below happened in production.
-import { ignoresDealer, dealerName, significantWords } from "../appraiser.js";
+import { ignoresDealer, dealerName, significantWords, searchPhrase } from "../appraiser.js";
 
 let pass = 0, fail = 0;
 const eq = (n, got, want) => {
@@ -43,6 +43,22 @@ eq("empty in, empty out", dealerName(""), "");
 // significantWords drops the filler that would otherwise clear the threshold on its own.
 eq("filler does not count", significantWords("old antique vintage heavy cast iron piece").size, 0);
 eq("substance counts", significantWords("WWII Silver Jefferson Nickels").size >= 3, true);
+
+// searchPhrase: a dealer's sentence reduced to something eBay can use. Production, 2026-09-23:
+// the raw sentence went to eBay, broaden() shortened it to "United States Mint These", and the
+// comparables came back as rolls of postage stamps for a lot of silver nickels.
+eq("strips the leading sentence filler",
+  searchPhrase("These are 4 rolls of world war 2 silver nickels"), "4 rolls world war 2 silver nickels");
+eq("keeps a plain name untouched",
+  searchPhrase("Red Wing 5 gallon salt glaze crock"), "Red Wing 5 gallon salt glaze crock");
+eq("drops a leading article", searchPhrase("a Griswold No 8 skillet"), "Griswold No 8 skillet");
+eq("keeps numbers", searchPhrase("I have 4 rolls"), "4 rolls");
+eq("keeps model numbers with periods", searchPhrase("Zenith model H725"), "Zenith model H725");
+eq("empty in, empty out", searchPhrase(""), "");
+eq("filler only", searchPhrase("these are"), "");
+eq("caps run-on descriptions at ten words",
+  searchPhrase("Griswold No 8 cast iron skillet large block logo heat ring erie pennsylvania usa")
+    .split(" ").length, 10);
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
