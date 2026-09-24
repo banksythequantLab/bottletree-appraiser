@@ -635,6 +635,12 @@ async function renderItemDetail(id) {
           ${r.market.count === 1
             ? `<b>1 comparable listed on eBay right now</b> — <b>$${r.market.low}</b>`
             : `<b>${r.market.count} comparable${r.market.count === 1 ? "" : "s"} listed on eBay right now</b> — $${r.market.low}–$${r.market.high}, median <b>$${r.market.median}</b>`}
+          ${r.market.split ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">
+            <b>Two different markets here</b>, ${r.market.split.ratio}× apart:
+            <div style="margin-top:3px">${r.market.split.lower.count} at $${r.market.split.lower.low}–$${r.market.split.lower.high} (median $${r.market.split.lower.median})</div>
+            <div>${r.market.split.upper.count} at $${r.market.split.upper.low}–$${r.market.split.upper.high} (median $${r.market.split.upper.median})</div>
+            <div class="muted" style="margin-top:3px">Usually a rarer pattern, colour or variant. If yours is the dearer kind, say so in the description and re-run — the range above averages across both.</div>
+          </div>` : ""}
           <div class="muted" style="margin-top:3px">Asking prices, not sold prices, so they run high. Checked ${esc(String(r.market.as_of).slice(0, 10))}.${r.market_all ? ` eBay returned ${r.market_all.count} listings in all ($${r.market_all.low}–$${r.market_all.high}); the rest were judged different items — see “Set aside” below.` : ""}</div>
           ${(r.live_listings || []).length ? `<div style="margin-top:5px">${r.live_listings.map(l =>
             `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><a href="${esc(l.url)}" target="_blank" rel="noopener" style="color:var(--cobalt)">$${Math.round(l.price)}${l.condition ? ` · ${esc(l.condition)}` : ""} — ${esc(l.title)}</a></div>`).join("")}</div>` : ""}

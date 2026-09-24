@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { ebayActive, ebayFailure, ebayBroadenedTo } from "../appraiser.js";
+import { ebayActive, ebayFailure, ebayBroadenedTo, splitByPrice } from "../appraiser.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -68,6 +68,11 @@ for (const q of ITEMS) {
   const b = ebayBroadenedTo();
   console.log(q);
   console.log(`  kept ${ps.length}  $${Math.min(...ps)}-$${Math.max(...ps)}  median $${med(ps)}${b ? `  [broadened to "${b}"]` : ""}`);
+  const s = splitByPrice(out);
+  if (s) {
+    const band = g => `${g.length} at $${Math.min(...g.map(x => x.price))}-$${Math.max(...g.map(x => x.price))}`;
+    console.log(`  TWO MARKETS (${s.ratio}x apart): ${band(s.lower)}  |  ${band(s.upper)}`);
+  }
   for (const x of out.slice(0, 3)) console.log(`    $${x.price}  ${x.title.slice(0, 72)}`);
   console.log();
 }

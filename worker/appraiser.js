@@ -632,6 +632,43 @@ export function unitDisagreement(meltValue, count, marketMedian) {
   return Math.round((hi / lo) * 100) / 100;
 }
 
+// A pool can be wide because it is incoherent, or wide because the search terms cover two
+// different markets. Those need opposite treatment and a spread threshold cannot tell them
+// apart — the Tavily path rejects anything over 6x, which would throw away a perfectly good
+// Butterprint pool for the crime of also containing the rare colourways.
+//
+// "Pyrex Butterprint Cinderella mixing bowl set" returns, live: 125, 201, 210, 220, 285, 299,
+// 300, 300, then 999 and 1115. That is not eight good comps and two outliers. It is a blue
+// Butterprint set worth about $250 and a Pumpkin or Yellow one worth four times as much, sharing
+// every search term they have. Publishing "$125-$1,115" as one range is not a price, and
+// trimming the top two would quietly misprice the dealer who owns the rare one.
+//
+// So: find the largest price gap, and treat it as a boundary only if both sides hold at least
+// two listings. One item across a gap is an outlier; several is a market.
+//
+// KNOWN LIMIT, measured not guessed. Run this against the live Pyrex pool on 2026-09-24 and it
+// finds nothing: 200, 200, 210, 285, 285, 299, 300, 300, 450, 1115, 1225. A single $450 listing
+// has appeared in the gap and drops the largest ratio to 2.48, just under the threshold. The two
+// markets are still there — everything at $1,000+ is a Pumpkin or Yellow colourway — but one
+// bridging listing is enough to hide them from a gap-based test. Lowering the threshold to catch
+// this one pool would be fitting a sample, not fixing the method.
+//
+// The method that would work reads the titles, not the prices: the model can already name what
+// distinguishes the dear listings from the cheap ones, and grouping on that name would survive
+// any number of bridging items. This function stays because it costs nothing and is right when
+// the gap is clean, but it is a proxy, and on the case it was written for it currently misses.
+export function splitByPrice(listings, minRatio = 2.5) {
+  const ls = (listings || []).filter(l => l && l.price > 0).sort((a, b) => a.price - b.price);
+  if (ls.length < 4) return null;
+  let at = -1, ratio = 0;
+  for (let i = 1; i < ls.length; i++) {
+    const r = ls[i].price / ls[i - 1].price;
+    if (r > ratio) { ratio = r; at = i; }
+  }
+  if (ratio < minRatio || at < 2 || ls.length - at < 2) return null;
+  return { lower: ls.slice(0, at), upper: ls.slice(at), ratio: Math.round(ratio * 100) / 100 };
+}
+
 // A handful of asking prices, summarised the way a dealer would say it out loud:
 // "three listed right now, $150 to $189". The median is the honest middle; the count is the caveat.
 function summarise(listings) {
@@ -1341,6 +1378,19 @@ export async function appraise(env, req) {
     const kept = keptLive(live, comparables);
     if (kept.length) marketShown = summarise(kept);
     else if (!comparables.length && rejected.length) marketShown = null;
+
+    // Two markets under one set of search terms. The dealer owns one of them, and which one
+    // changes the price several-fold, so neither a single range nor a quiet trim is honest.
+    const parts = splitByPrice(kept.length ? kept : (live || []));
+    if (parts && marketShown) {
+      marketShown.split = { lower: summarise(parts.lower), upper: summarise(parts.upper), ratio: parts.ratio };
+      const lo = marketShown.split.lower, hi = marketShown.split.upper;
+      warnings.push(`these listings are two different markets, not one spread: ${lo.count} at ` +
+        `$${lo.low}-$${lo.high} and ${hi.count} at $${hi.low}-$${hi.high}, ${parts.ratio}x apart. ` +
+        `A rarer pattern, colour or variant usually explains a gap like that — if yours is the ` +
+        `dearer kind, say which in the description and re-run, because the range above averages ` +
+        `across both.`);
+    }
     if (market && !marketShown)
       warnings.push(`all ${market.count} eBay listings found were judged to be different items, so ` +
         `there is no live price range for this one — the estimate is not anchored to today's market.`);
