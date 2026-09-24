@@ -992,11 +992,47 @@ export function searchPhrase(s) {
     .slice(0, 10).join(" ").trim();
 }
 
+// A dealer types "4 candle sticks made of brass"; the model answers "Set of Four Brass
+// Candlesticks". Those are the same sentence, and a plain token comparison scores them as sharing
+// exactly one word - "brass" - because "candlesticks" and "candle sticks" are different strings
+// and "four" and "4" are different strings. Production, 2026-09-24: that one shared word tripped
+// the dealer-override below, and a correct identification was replaced by the dealer's raw typed
+// sentence as the item's NAME, with the card telling them "your description and the photographs
+// disagree about what this is" when they agreed completely.
+//
+// So the comparison also carries every adjacent pair of tokens run together. "candle" + "sticks"
+// becomes "candlesticks" and matches. Pairs are built from the tokens BEFORE stopwords are
+// dropped, so a stopword sitting between two halves cannot hide the compound.
+const compounds = s => {
+  const raw = String(s || "").toLowerCase().match(/[a-z][a-z'-]{2,}/g) || [];
+  const out = new Set(raw.filter(w => !STOP.has(w)));
+  for (let i = 0; i + 1 < raw.length; i++) out.add(raw[i] + raw[i + 1]);
+  return out;
+};
+
+// Counting shared words is not enough; it matters WHICH word is shared. These are modifiers -
+// materials, finishes, counts, packaging. They describe a thing without being the thing, so two
+// completely different objects share them all the time. "Silver" is the one that cost real money:
+// "4 rolls of world war 2 silver nickels" and "2023 American Silver Eagle Coin Set" have exactly
+// one word in common and it is this one. They are not the same object.
+//
+// Words like "brass" and "copper" are absent because STOP already removes them. "nickels" is
+// absent on purpose - the coin is a different token from the metal "nickel", and a dealer saying
+// "nickels" is naming the object.
+const WEAK = new Set(["silver", "gold", "sterling", "plated", "plate", "bronze", "pewter", "chrome",
+  "enamel", "enameled", "painted", "crystal", "leather", "marble", "gilt", "gilded",
+  "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "dozen",
+  "set", "sets", "pair", "pairs", "lot", "lots", "group", "box", "boxed"]);
+
 export function ignoresDealer(name, description) {
-  const dw = words(dealerName(description));
+  const said = dealerName(description);
+  // Size is still measured in the dealer's real words. Counting the synthetic compounds here
+  // would push a three-word description over the "enough words to be sure" threshold below.
+  const dw = words(said);
   if (!dw.size || !String(name || "").trim()) return false;
-  let shared = 0;
-  for (const w of words(name)) if (dw.has(w)) shared++;
+  const dc = compounds(said);
+  let shared = 0, strong = 0;
+  for (const w of compounds(name)) if (dc.has(w)) { shared++; if (!WEAK.has(w)) strong++; }
   if (shared === 0) return true;
 
   // One word in common is not agreement. Production, 2026-09-23: against "4 rolls of world war 2
@@ -1010,7 +1046,12 @@ export function ignoresDealer(name, description) {
   // Only applied when the dealer gave enough words for a single match to be plausibly accidental.
   // Below that, a lone shared word is a large share of everything they said, and overriding a
   // specific identification on that basis would do more harm than good.
-  if (dw.size >= 4 && shared < 2) return true;
+  // The rule used to be "fewer than two shared words means they disagree". That is what threw
+  // away "Set of Four Brass Candlesticks" on 2026-09-24: brass is a stopword, four is a count,
+  // and "candlesticks" was the single remaining match, so a correct answer scored the same as
+  // the Silver Eagle disaster. One STRONG match is agreement - the model named the object the
+  // dealer named. One weak match is not: sharing only "silver", or only "set", says nothing.
+  if (dw.size >= 4 && strong < 1) return true;
   return false;
 }
 const MAKER_SUFFIX = "(?:CO\\.?|COMPANY|MFG\\.?|MANUFACTURING|BROS\\.?|BROTHERS|& SONS?|INC\\.?|LTD\\.?|WORKS|POTTERY|FOUNDRY)";

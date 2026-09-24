@@ -80,5 +80,27 @@ eq("caps run-on descriptions at ten words",
   searchPhrase("Griswold No 8 cast iron skillet large block logo heat ring erie pennsylvania usa")
     .split(" ").length, 10);
 
+// ---- the override firing on a CORRECT identification ----
+// Production, 2026-09-24, first real run through a camera. Four brass candlesticks photographed
+// from directly overhead. The model got it exactly right - "Set of Four Brass Candlesticks" - and
+// the override threw it away, because "brass" is a stopword, "four" is a count, and "candle
+// sticks" and "candlesticks" are different strings. The dealer's raw typed sentence became the
+// item's NAME, and the card told them their description and the photographs disagreed about what
+// it was when the two agreed completely.
+const CANDLES = "4 candle sticks made of brass roughly 1/2 a pound each";
+eq("a correct identification is not an override",
+  ignoresDealer("Set of Four Brass Candlesticks", CANDLES), false);
+eq("spaced compound matches the joined one",
+  ignoresDealer("Antique Brass Candlesticks", CANDLES), false);
+eq("joined compound matches the spaced one",
+  ignoresDealer("Pair of Candle Sticks", "vintage brass candlesticks I found"), false);
+// And the disaster it was written for still fires. One shared word, and that word a material.
+eq("silver alone is still not agreement",
+  ignoresDealer("2023 American Silver Eagle Coin Set", "4 rolls of world war 2 silver nickels"), true);
+eq("a count alone is not agreement",
+  ignoresDealer("Set of Four Porcelain Figurines", "four cast iron door stops from the barn"), true);
+eq("naming the object is agreement even once",
+  ignoresDealer("World War II Silver Nickel Roll", "4 rolls of world war 2 silver nickels"), false);
+
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
