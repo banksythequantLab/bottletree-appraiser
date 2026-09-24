@@ -75,7 +75,7 @@ FIELD GUIDE (do not copy these sentences into the JSON):
 EXAMPLE of a filled answer for a different item (format only):
 {"identification":{"name":"Red Wing 3-gallon stoneware crock","category":"Stoneware","maker":"Red Wing Union Stoneware Co.","origin":"Red Wing, Minnesota, USA","period":"c. 1915-1930","style":"Utilitarian salt-glaze"},"confidence":0.85,"evidence":["Red Wing oval stamp on face - factory-marked, post-1906 union period","Cobalt '3' capacity mark matches 3-gallon body size"],"transcribed_text":["RED WING UNION STONEWARE CO.","3"],"price_range":{"low":90,"high":160,"suggested_retail":135,"floor":90,"currency":"USD","basis":"Common marked Red Wing size; hairline would drop it to the low end."},"listing":{"title":"Red Wing 3-Gallon Stoneware Crock, Union Stoneware Co., c. 1920","description":"A classic Red Wing 3-gallon crock with the oval Union Stoneware stamp and a cobalt 3. Sturdy salt-glazed body with the warm patina these pieces earn in a century of farmhouse use.\\n\\nRim and base are sound. A handsome piece for a kitchen counter, utensil storage or a farmhouse display.","tags":["red wing","stoneware","crock","farmhouse"],"condition_grade":"Very good"},"questions_for_dealer":["Any hairlines or chips on the rim or base?"]}`;
 
-const REPRICE_SYSTEM = `You are a senior antiques appraiser. You previously appraised an item; now you have live
+export const REPRICE_SYSTEM = `You are a senior antiques appraiser. You previously appraised an item; now you have live
 comparable listings from the web. Comparables may be irrelevant or asking (not sold) prices - weigh them
 accordingly. Return ONLY a JSON object: {"price_range": {...same shape...}, "comparables": [{"title","price","url","source","note"}],
 "basis_note": "one sentence", "rejected": [{"title","why"}]}.
@@ -144,7 +144,7 @@ function closeOpen(chunk) {
 }
 
 // ---------- Token Factory (OpenAI-compatible) over plain fetch ----------
-function cfg(env) {
+export function cfg(env) {
   return {
     key: env.NEBIUS_API_KEY || "",
     base: (env.NEBIUS_BASE_URL || DEFAULTS.base).replace(/\/+$/, "") + "/",
@@ -184,7 +184,10 @@ async function visionJson(c, prompt, imageUrl, maxTokens = 900, temperature = 0.
   throw last || new Error("vision failed");
 }
 
-async function textJson(c, system, user, maxTokens = 1800) {
+// Exported so tools/kept_pool_check.mjs can drive the real repricer over real listings without
+// needing photographs. Measuring the kept pool is the only way to know whether tooWide fires on
+// half of all appraisals or on a useful few, and the kept pool only exists after this call.
+export async function textJson(c, system, user, maxTokens = 1800) {
   // Nemotron 3 Super is a reasoning model: its thinking shares the completion budget with the answer.
   const max_tokens = Math.max(maxTokens, 6000);
   const base = { model: c.text, messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens, temperature: 0.2 };

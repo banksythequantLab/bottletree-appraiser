@@ -55,13 +55,22 @@ eq("the pool that hides from splitByPrice does not hide from tooWide", tooWide(2
 eq("threshold is shared with the Tavily path", MAX_COHERENT_SPREAD, 6);
 eq("exactly 6x is not too wide", tooWide(100, 600), false);
 eq("a hair over 6x is", tooWide(100, 600.01), true);
-// Real pools from the live sweep of 2026-09-24. Five of the ten raw eBay pools clear 6x:
-// Red Wing 6.2, Roseville 7.3, Pyrex 6.1, Hull 7.0, Kennedy 11.5. That sounds high, and it is
-// measured on the RAW pool - the warning runs on what the model kept, which is narrower, and
-// I have not measured the firing rate there. If it turns out to fire on most appraisals it is
-// worth nothing and should be raised or dropped; that is a measurement to take, not a guess to
-// make now. Each of the five looks like a genuine two-market pool on inspection: the Kennedy
-// one runs $49.95 to $575 for "roll of 20", and $49.95 does not buy twenty silver halves.
+// Real pools from the live sweep of 2026-09-24. Five of the ten RAW eBay pools clear 6x, which
+// looked like a warning that would fire on half of all appraisals. It is not, and the numbers
+// below are raw because that is the scary case; tooWide runs on the KEPT pool.
+//
+// MEASURED, same day, with tools/kept_pool_check.mjs driving the real repricer over the same ten
+// live queries: raw pools over 6x, 5/10. Kept pools that warn, 0/10. The repricer collapses
+// every wide pool on its own and names why - "Pumpkin orange colorway, a rare variant not
+// comparable to standard turquoise/white Butterprint" takes Pyrex from 20.42x raw to 2.25x kept;
+// "Bee Sting #5 butter churn crock, a different functional form" takes Red Wing 6.2x to 3.27x;
+// "Iced tea spoon, longer than a teaspoon" takes Towle 4.72x to 1.64x. The widest kept pool of
+// the ten was 4.1x.
+//
+// So tooWide is a backstop that did not fire once on a healthy pipeline, which is what a backstop
+// should look like and is also zero evidence that it ever fires in production. It earns its place
+// only when the repricer returns nothing usable or keeps junk, and that case has not been
+// observed. Do not read these passing tests as proof the warning works in the field.
 eq("Griswold skillets", tooWide(59.99, 224.99), false);
 eq("Zenith radios", tooWide(39, 160), false);
 eq("Featherweights after the parts fix", tooWide(219.95, 599), false);
