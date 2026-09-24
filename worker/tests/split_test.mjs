@@ -1,7 +1,7 @@
 // Run:  node worker/tests/split_test.mjs
 // Telling a pool that is wide because it is incoherent from a pool that is wide because the
 // search terms cover two different markets. Prices below are from live eBay pools.
-import { splitByPrice } from "../appraiser.js";
+import { splitByPrice, tooWide, MAX_COHERENT_SPREAD } from "../appraiser.js";
 
 let pass = 0, fail = 0;
 const eq = (n, got, want) => {
@@ -48,6 +48,35 @@ eq("order does not matter", of(splitByPrice(P([1115, 125, 300, 999, 201, 285, 21
 // so that whoever replaces this with title-based grouping has the failing case in front of them.
 eq("a bridging listing hides a real two-market pool",
   splitByPrice(P([200, 200, 210, 285, 285, 299, 300, 300, 450, 1114.99, 1225])), null);
+
+// ---- tooWide, the backstop for exactly that miss ----
+// The pool splitByPrice cannot split is still 6.1x wide, and the dealer still needs telling.
+eq("the pool that hides from splitByPrice does not hide from tooWide", tooWide(200, 1225), true);
+eq("threshold is shared with the Tavily path", MAX_COHERENT_SPREAD, 6);
+eq("exactly 6x is not too wide", tooWide(100, 600), false);
+eq("a hair over 6x is", tooWide(100, 600.01), true);
+// Real pools from the live sweep of 2026-09-24. Five of the ten raw eBay pools clear 6x:
+// Red Wing 6.2, Roseville 7.3, Pyrex 6.1, Hull 7.0, Kennedy 11.5. That sounds high, and it is
+// measured on the RAW pool - the warning runs on what the model kept, which is narrower, and
+// I have not measured the firing rate there. If it turns out to fire on most appraisals it is
+// worth nothing and should be raised or dropped; that is a measurement to take, not a guess to
+// make now. Each of the five looks like a genuine two-market pool on inspection: the Kennedy
+// one runs $49.95 to $575 for "roll of 20", and $49.95 does not buy twenty silver halves.
+eq("Griswold skillets", tooWide(59.99, 224.99), false);
+eq("Zenith radios", tooWide(39, 160), false);
+eq("Featherweights after the parts fix", tooWide(219.95, 599), false);
+// These two do warn, and should. I asserted false on the crocks first and the test caught me.
+// The live pool runs from a $125 "Primitive Bee Sting #5 Stoneware Butter Churn ~ Early Red
+// Wing" to a $775 "5 Gallon Salt Glaze Crock - Leaf Decorated - Red Wing". Decorated stoneware
+// against plain is the same two-market shape as Butterprint blue against Pumpkin, so 6.2x is
+// the warning doing its job rather than a false positive.
+eq("Red Wing crocks, 6.2x, decorated against plain", tooWide(125, 775), true);
+eq("Roseville, 7.3x, warns", tooWide(24, 175), true);
+// Degenerate inputs must not warn.
+eq("no low", tooWide(0, 500), false);
+eq("no high", tooWide(100, 0), false);
+eq("undefined", tooWide(undefined, undefined), false);
+eq("a single listing is not a spread", tooWide(300, 300), false);
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

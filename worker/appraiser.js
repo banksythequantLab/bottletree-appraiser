@@ -678,6 +678,22 @@ export function dealerQuestions(first) {
   return clean(strs(first && first.questions_for_dealer)).slice(0, 3).map(q => ({ q, options: [] }));
 }
 
+// The backstop for what splitByPrice misses, below. A bridging listing can hide a gap but it
+// cannot hide a spread, so when the kept pool is wider than one product plausibly is, say so
+// even though no clean split was found. 6x is the Tavily path's existing coherence threshold,
+// reused rather than invented.
+//
+// The comment below is right that REJECTING a 6x pool would throw away a good Butterprint pool
+// for the crime of containing the rare colourways. That argument is against rejecting, not
+// against saying anything at all. This only warns, and the wording it triggers tells the dealer
+// the range is the category rather than their item, which is exactly what a pool containing two
+// colourways is. Silence was the third option and it is the one that misprices people.
+export const MAX_COHERENT_SPREAD = 6;
+export function tooWide(low, high, maxRatio = MAX_COHERENT_SPREAD) {
+  if (!(low > 0) || !(high > 0)) return false;
+  return high / low > maxRatio;
+}
+
 // A pool can be wide because it is incoherent, or wide because the search terms cover two
 // different markets. Those need opposite treatment and a spread threshold cannot tell them
 // apart — the Tavily path rejects anything over 6x, which would throw away a perfectly good
@@ -1453,6 +1469,19 @@ export async function appraise(env, req) {
         `A rarer pattern, colour or variant usually explains a gap like that — if yours is the ` +
         `dearer kind, say which in the description and re-run, because the range above averages ` +
         `across both.`);
+    }
+    // splitByPrice only fires on a clean gap. A pool with a listing sitting in the middle of the
+    // gap has no clean gap, and stays silent however wide it is: the live Butterprint Cinderella
+    // pool runs $200-$1225 (6.1x) and a $450 bridging listing drops the largest-gap ratio to 2.48,
+    // under the 2.5 threshold. The spread is still the dealer's problem, so say so. The Tavily
+    // path already rejects pools wider than 6x; the eBay path cannot reject them - these are the
+    // only live prices there are - so it warns instead.
+    if (marketShown && !marketShown.split && tooWide(marketShown.low, marketShown.high)) {
+      warnings.push(`these listings run from $${marketShown.low} to $${marketShown.high}, ` +
+        `${Math.round((marketShown.high / marketShown.low) * 10) / 10}x apart, which is too wide to ` +
+        `be one product. A rarer pattern, colour, size or variant is usually hiding in the search ` +
+        `terms. Say which one yours is in the description and re-run; until then treat the range ` +
+        `above as the whole category, not as your item.`);
     }
     if (market && !marketShown)
       warnings.push(`all ${market.count} eBay listings found were judged to be different items, so ` +
