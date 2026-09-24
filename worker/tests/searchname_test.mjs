@@ -94,6 +94,20 @@ eq("spaced compound matches the joined one",
   ignoresDealer("Antique Brass Candlesticks", CANDLES), false);
 eq("joined compound matches the spaced one",
   ignoresDealer("Pair of Candle Sticks", "vintage brass candlesticks I found"), false);
+// Singular against plural, the half the compound fix missed. Measured 2026-09-24: five runs on
+// one photograph of the same candlesticks produced five correct answers, and the override threw
+// away four of them. Every one of these is a real model output from that batch.
+eq("Brass candlestick", ignoresDealer("Brass candlestick", CANDLES), false);
+eq("Brass candlestick (set of four)", ignoresDealer("Brass candlestick (set of four)", CANDLES), false);
+eq("Abstract Brass Candlestick", ignoresDealer("Abstract Brass Candlestick", CANDLES), false);
+eq("Mid-Century Modern Brass Candlestick",
+  ignoresDealer("Mid-Century Modern Brass Candlestick", CANDLES), false);
+// The only one of the five that survived before, and must keep surviving.
+eq("Brass Candle Stick", ignoresDealer("Brass Candle Stick", CANDLES), false);
+// The reverse direction: dealer plural, model singular, and dealer singular, model plural.
+eq("dealer singular, model plural",
+  ignoresDealer("Pair of Brass Candlesticks", "one brass candlestick from an estate"), false);
+
 // And the disaster it was written for still fires. One shared word, and that word a material.
 eq("silver alone is still not agreement",
   ignoresDealer("2023 American Silver Eagle Coin Set", "4 rolls of world war 2 silver nickels"), true);

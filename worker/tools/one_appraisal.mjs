@@ -8,7 +8,7 @@
 // clarification the model asks for. The worker's own /appraise route wraps this same call; this
 // skips the account, the item record and the credit, so a photo can be put through the real
 // pipeline without creating a sale.
-import { appraise } from "../appraiser.js";
+import { appraise, ignoresDealer } from "../appraiser.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -64,12 +64,35 @@ function summarise(rs) {
   const ranked = [...counts].sort((a, b) => b[1] - a[1]);
   console.log(`${ranked.length} distinct identification${ranked.length === 1 ? "" : "s"} in ${rs.length} runs:`);
   for (const [n, c] of ranked) console.log(`  ${String(c).padStart(2)}x  ${n}`);
-  // Majority vote is the cheapest possible self-consistency: run N, keep the answer that recurs.
-  // It is only worth paying for if the modal answer is (a) a majority and (b) the right one.
-  const [topName, topCount] = ranked[0];
-  console.log(`\nmodal answer wins ${topCount}/${rs.length}` +
-    `${topCount > rs.length / 2 ? " - a majority, so a vote of N would settle on it" :
+  // Counting exact strings is the WRONG unit, and this harness said so the first time it was
+  // pointed at a real item. Five runs on the candlesticks gave five distinct strings - "Brass
+  // Candlestick, Angular Mid-Century Modern", "Unsigned Brass Candle Stick", "Vintage Brass
+  // Geometric Candlestick", "Brass Candlestick" - and a string count reported 1/5, "no majority",
+  // when four of the five are plainly the same object described differently.
+  //
+  // So they are also grouped by AGREEMENT, using ignoresDealer in both directions: the same
+  // tested machinery the appraiser uses to decide whether two names describe one thing. That is
+  // the number the self-consistency decision actually turns on, because a vote over raw strings
+  // would never converge while a vote over meanings would.
+  const clusters = [];
+  for (const n of names) {
+    const hit = clusters.find(c => !ignoresDealer(n, c[0]) && !ignoresDealer(c[0], n));
+    if (hit) hit.push(n); else clusters.push([n]);
+  }
+  clusters.sort((a, b) => b.length - a.length);
+  console.log(`\ngrouped by agreement rather than by string, ${clusters.length} distinct ` +
+    `identification${clusters.length === 1 ? "" : "s"}:`);
+  for (const c of clusters) console.log(`  ${String(c.length).padStart(2)}x  ${c[0]}` +
+    (c.length > 1 ? `   (also: ${c.slice(1).join("; ")})` : ""));
+
+  // Self-consistency is only worth paying for if the modal answer is a majority AND correct.
+  const top = clusters[0].length;
+  console.log(`\nmodal meaning wins ${top}/${rs.length}` +
+    `${top > rs.length / 2 ? " - a majority, so a vote of N would settle on it" :
       " - NOT a majority, so a vote of N would be settling a tie by luck"}`);
+  const topString = ranked[0][1];
+  console.log(`modal exact string wins ${topString}/${rs.length}` +
+    `${topString < top ? " - which is why voting on strings would get this wrong" : ""}`);
 
   const confs = rs.map(r => r.confidence).filter(x => typeof x === "number");
   if (confs.length) console.log(`confidence   ${Math.min(...confs)} to ${Math.max(...confs)}`);

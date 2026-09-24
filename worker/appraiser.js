@@ -1028,10 +1028,24 @@ export function searchPhrase(s) {
 // So the comparison also carries every adjacent pair of tokens run together. "candle" + "sticks"
 // becomes "candlesticks" and matches. Pairs are built from the tokens BEFORE stopwords are
 // dropped, so a stopword sitting between two halves cannot hide the compound.
+// And the plural, for the same reason. Measured 2026-09-24, five runs on one photograph of the
+// candlesticks: the model answered "Brass candlestick", "Brass candlestick (set of four)",
+// "Abstract Brass Candlestick", "Mid-Century Modern Brass Candlestick" and "Brass Candle Stick".
+// All five right. The override fired on FOUR of them and replaced a good name with the dealer's
+// raw typed sentence. Only the two-word "Brass Candle Stick" survived, because it happens to
+// share the bare token "candle"; the dealer wrote "candle sticks", whose compound is the PLURAL
+// "candlesticks", and the singular "candlestick" is a different string.
+//
+// The stem is added alongside the word, never instead of it, so a word that merely ends in s
+// keeps its own form too - "glass" stays "glass" and also contributes a harmless "glas" that
+// matches nothing real.
+const stem = w => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : null);
 const compounds = s => {
   const raw = String(s || "").toLowerCase().match(/[a-z][a-z'-]{2,}/g) || [];
-  const out = new Set(raw.filter(w => !STOP.has(w)));
-  for (let i = 0; i + 1 < raw.length; i++) out.add(raw[i] + raw[i + 1]);
+  const out = new Set();
+  const add = w => { out.add(w); const st = stem(w); if (st) out.add(st); };
+  for (const w of raw) if (!STOP.has(w)) add(w);
+  for (let i = 0; i + 1 < raw.length; i++) add(raw[i] + raw[i + 1]);
   return out;
 };
 
