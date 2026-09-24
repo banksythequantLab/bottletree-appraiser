@@ -689,6 +689,17 @@ export default {
           if (!photos.length) return J({ error: "add at least one photo first" }, 400);
           if (!env.APPRAISER_URL && !env.NEBIUS_API_KEY) return J({ error: "appraiser not configured" }, 503);
           const b = await readJson(request);
+          // Never let the model's own listing copy come back in as the dealer's description.
+          // The item page's description box holds ai_description; posting it here once replaced
+          // a dealer's "4 rolls of world war 2 silver nickels" with a paragraph about a single
+          // modern nickel, after which the lot priced at $1.42 against $576 of silver. The
+          // client is fixed too; this is the backstop, because what a dealer wrote cannot be
+          // recovered once it is gone.
+          if (b.description !== undefined && item.ai_description &&
+              String(b.description).trim() === String(item.ai_description).trim()) {
+            console.log("appraise: ignored echoed ai_description for item", iid);
+            delete b.description;
+          }
           if (b.description !== undefined || b.markings !== undefined) {
             await db.prepare("UPDATE items SET description=COALESCE(?,description), markings=COALESCE(?,markings) WHERE id=?")
               .bind(b.description ?? null, b.markings ?? null, iid).run();

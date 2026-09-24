@@ -576,7 +576,14 @@ async function renderItemDetail(id) {
   if ($("#saveDraft")) $("#saveDraft").onclick = () => publishAs(item.listing_status === "live" ? "live" : "hidden");
   if ($("#unlist")) $("#unlist").onclick = () => publishAs("hidden");
   if ($("#viewLive")) { const me = await api("/auth/me"); $("#viewLive").href = "/shop/" + me.shop_slug + "/item/" + id; }
-  const rerun = async () => { await api("/items/" + id + "/appraise", { method: "POST", body: JSON.stringify(payload()) }); renderItemDetail(id); };
+  // Re-run must NOT post the form's description. That box holds the LISTING copy the model
+  // wrote (ai_description), and /appraise reads `description` as the dealer's own account of
+  // the item and writes it to items.description. Posting one as the other replaced "These are
+  // 4 rolls of world war 2 silver nickels" with a paragraph about a 2023 Jefferson nickel on
+  // the main app, permanently, and the lot then priced at $1.42 against $576 of silver. It is
+  // self-confirming: the checks that catch a bad identification compare it against the dealer's
+  // words, and those words had become the identification's own output. Send nothing.
+  const rerun = async () => { await api("/items/" + id + "/appraise", { method: "POST", body: "{}" }); renderItemDetail(id); };
   if ($("#reappraise")) $("#reappraise").onclick = rerun;
   if ($("#retry")) $("#retry").onclick = rerun;
   if (pending) pollT = setTimeout(() => renderItemDetail(id), 4000);
