@@ -44,6 +44,7 @@ const IDENTIFY_SCHEMA = `{
  "transcribed_text": [],
  "price_range": {"low": 0, "high": 0, "suggested_retail": 0, "floor": 0, "currency": "USD", "basis": ""},
  "listing": {"title": "", "description": "", "tags": [], "condition_grade": ""},
+ "dealer_questions": [{"q": "", "options": []}],
  "questions_for_dealer": []
 }
 
@@ -62,6 +63,14 @@ FIELD GUIDE (do not copy these sentences into the JSON):
   questions_for_dealer the single specific photograph that would settle it: which face, which mark,
   from how close. "A close, sharp photo of the stamp on the base" is useful; "more photos" is not.
   Trust what the dealer wrote over what you think you see: they are holding the object.
+- dealer_questions: when you are unsure, 1-3 questions the DEALER can answer by looking at the
+  object in their hand, each with 2-4 short tappable options. They are standing at a sale holding
+  the thing; a tap costs them a second and typing costs them a minute.
+  Ask about what is visible or measurable, never about judgement: "Is there a mint mark under the
+  date?" ["Yes","No","Can't tell"], "What years are on the coins?" ["1942-45","Other","Mixed"],
+  "Does a magnet stick to it?" ["Yes","No"]. Options must be mutually exclusive, under 24
+  characters, and phrased as the dealer's answer. Include "Can't tell" whenever it is a real
+  possibility. Ask nothing you could answer yourself from the photographs.
 
 EXAMPLE of a filled answer for a different item (format only):
 {"identification":{"name":"Red Wing 3-gallon stoneware crock","category":"Stoneware","maker":"Red Wing Union Stoneware Co.","origin":"Red Wing, Minnesota, USA","period":"c. 1915-1930","style":"Utilitarian salt-glaze"},"confidence":0.85,"evidence":["Red Wing oval stamp on face - factory-marked, post-1906 union period","Cobalt '3' capacity mark matches 3-gallon body size"],"transcribed_text":["RED WING UNION STONEWARE CO.","3"],"price_range":{"low":90,"high":160,"suggested_retail":135,"floor":90,"currency":"USD","basis":"Common marked Red Wing size; hairline would drop it to the low end."},"listing":{"title":"Red Wing 3-Gallon Stoneware Crock, Union Stoneware Co., c. 1920","description":"A classic Red Wing 3-gallon crock with the oval Union Stoneware stamp and a cobalt 3. Sturdy salt-glazed body with the warm patina these pieces earn in a century of farmhouse use.\\n\\nRim and base are sound. A handsome piece for a kitchen counter, utensil storage or a farmhouse display.","tags":["red wing","stoneware","crock","farmhouse"],"condition_grade":"Very good"},"questions_for_dealer":["Any hairlines or chips on the rim or base?"]}`;
@@ -630,6 +639,24 @@ export function unitDisagreement(meltValue, count, marketMedian) {
   const perUnit = meltValue / count;
   const hi = Math.max(perUnit, marketMedian), lo = Math.min(perUnit, marketMedian);
   return Math.round((hi / lo) * 100) / 100;
+}
+
+// Questions the dealer can answer with a tap. The model is asked for these as {q, options}, but
+// a model that ignores a new field is a routine event, not an emergency — so the plain
+// questions_for_dealer strings are the fallback, and the card simply shows a text box for those.
+// Nothing here fails if dealer_questions never arrives.
+export function dealerQuestions(first) {
+  const raw = Array.isArray(first && first.dealer_questions) ? first.dealer_questions : [];
+  const asked = raw
+    .filter(x => x && typeof x === "object" && String(x.q || "").trim())
+    .slice(0, 3)
+    .map(x => ({
+      q: String(x.q).trim().slice(0, 140),
+      // Four is as many chips as fit on a phone without wrapping into a wall of buttons.
+      options: strs(x.options).map(s => String(s).trim().slice(0, 24)).filter(Boolean).slice(0, 4),
+    }));
+  if (asked.length) return asked;
+  return clean(strs(first && first.questions_for_dealer)).slice(0, 3).map(q => ({ q, options: [] }));
 }
 
 // A pool can be wide because it is incoherent, or wide because the search terms cover two
@@ -1544,12 +1571,17 @@ export async function appraise(env, req) {
       candidates: idConflict ? [idConflict.model, idConflict.dealer] : null,
       question: clean(strs(first.questions_for_dealer))[0] ||
         "What is it, in a few words — and is there any writing or stamp on it?",
-      // Everything the model said would change the appraisal, not just the first. A dealer at a
-      // sale will answer three short questions in the time it takes to think of one sentence,
-      // and each answer goes back as their own words — the only input here that is not
-      // downstream of the identification being questioned.
-      questions: clean(strs(first.questions_for_dealer)).slice(0, 3),
+      // Everything the model said would change the appraisal, not just the first, and with
+      // tappable answers where it offered them. A dealer at a sale answers three chips in the
+      // time it takes to think of one sentence, and each answer goes back as their own words —
+      // the only input here that is not downstream of the identification being questioned.
+      questions: dealerQuestions(first),
     } : null,
+    // Returned on every appraisal, not only when the gate fires. The card only shows these when
+    // it is withholding a price, but having them on a confident run is what makes it possible to
+    // tell whether the model is actually answering the dealer_questions contract at all, rather
+    // than quietly ignoring a field nobody can see.
+    dealer_questions: dealerQuestions(first),
     // The judged market is the headline; the unjudged pool stays available rather than being
     // thrown away, so nothing is hidden from a dealer who wants to see everything eBay returned.
     market: marketShown,

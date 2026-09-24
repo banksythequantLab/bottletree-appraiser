@@ -621,9 +621,11 @@ async function renderItemDetail(id) {
               `<button type="button" data-pick="${n}">${esc(c.length > 52 ? c.slice(0, 50) + "…" : c)}</button>`).join("")}</div>
             <div class="muted" style="margin-top:4px;font-size:.78rem">One tap settles it — or answer below instead.</div>
           </div>` : ""}
-          ${(nc.questions && nc.questions.length ? nc.questions : [nc.question]).map((q, n) => `
-            <div style="margin-top:8px;font-size:.85rem"><b>${esc(q)}</b></div>
-            <input id="clarify${n}" style="margin-top:4px" placeholder="${n === 0 ? "A few words is enough" : "Optional"}">`).join("")}
+          ${(nc.questions && nc.questions.length ? nc.questions : [{ q: nc.question, options: [] }]).map((it, n) => `
+            <div style="margin-top:8px;font-size:.85rem"><b>${esc(it.q)}</b></div>
+            ${it.options && it.options.length
+              ? `<div class="seg" data-ans="${n}">${it.options.map(o => `<button type="button" data-opt="${esc(o)}">${esc(o)}</button>`).join("")}</div>`
+              : `<input id="clarify${n}" style="margin-top:4px" placeholder="${n === 0 ? "A few words is enough" : "Optional"}">`}`).join("")}
           <div style="height:8px"></div>
           <button class="btn sm" id="clarifyGo">Answer &amp; price it</button>
           ${r.melt && r.melt.applied ? `<div class="muted" style="margin-top:8px;font-size:.8rem">What we do know: it holds <b>$${r.melt.value}</b> of ${esc(r.melt.metal)} at today's spot — but that figure assumes the identification too.</div>` : ""}
@@ -733,13 +735,24 @@ async function renderItemDetail(id) {
   });
   // Otherwise each question the model asked gets its own line, and the answers go back as the
   // dealer's own words, paired with the question so they read as statements later.
+  // Chips are a single-choice group: tapping one deselects its siblings. Nothing is sent until
+  // "Answer & price it", so a mis-tap costs nothing and the dealer can answer all three first.
+  app.querySelectorAll("[data-ans] [data-opt]").forEach(b => b.onclick = () => {
+    const on = b.classList.contains("on");
+    b.parentElement.querySelectorAll("[data-opt]").forEach(x => x.classList.remove("on"));
+    if (!on) b.classList.add("on");
+  });
   if ($("#clarifyGo")) $("#clarifyGo").onclick = async () => {
-    const qs = (nc.questions && nc.questions.length ? nc.questions : [nc.question]);
-    const answered = qs.map((q, n) => {
-      const v = ($("#clarify" + n) || {}).value;
-      return v && v.trim() ? `${q.replace(/\?+$/, "")}: ${v.trim()}` : null;
+    const qs = (nc.questions && nc.questions.length ? nc.questions : [{ q: nc.question, options: [] }]);
+    const answered = qs.map((it, n) => {
+      const chip = app.querySelector(`[data-ans="${n}"] [data-opt].on`);
+      const v = chip ? chip.dataset.opt : (($("#clarify" + n) || {}).value || "").trim();
+      return v ? `${String(it.q).replace(/\?+$/, "")}: ${v}` : null;
     }).filter(Boolean);
-    if (!answered.length) { const f = $("#clarify0"); if (f) f.focus(); return toast("A few words is enough — what is it?"); }
+    if (!answered.length) {
+      const f = $("#clarify0"); if (f) f.focus();
+      return toast("Tap an answer, or type a few words.");
+    }
     await answerWith(answered.join(". "), $("#clarifyGo"));
   };
   if ($("#retry")) $("#retry").onclick = rerun;
