@@ -422,7 +422,12 @@ export function sizesIn(text) {
 // set. So a part word only rejects when the title leads with it or marks itself as the part
 // alone, and never when the dealer asked about that part in the first place.
 const PART = "lids?|knobs?|dials?|handles?|covers?|stoppers?|inserts?|liners?|cords?|grilles?|bezels?|faceplates?|decals?|badges?|emblems?|hinges?|latches|spouts?|shades?|drawers?|legs?|feet";
-const PART_ONLY = new RegExp(`\\b(?:${PART}|parts?)\\s+only\\b|\\bfor\\s+parts\\b|\\bparts?\\s*[/&]\\s*repair\\b`, "i");
+// "Part Or Repair" is the same phrase as "parts/repair" with different punctuation. A live
+// Featherweight sweep kept a $149.90 "Part Or Repair" listing in a pool of working machines
+// whose median was $400, dragging the quoted floor down by 2.7x. Separator is /, &, or, or and,
+// in either word order.
+const PART_REPAIR = `\\b(?:parts?\\s*(?:[/&]|\\bor\\b|\\band\\b)\\s*repair|repair\\s*(?:[/&]|\\bor\\b|\\band\\b)\\s*parts?)\\b`;
+const PART_ONLY = new RegExp(`\\b(?:${PART}|parts?)\\s+only\\b|\\bfor\\s+parts\\b|${PART_REPAIR}`, "i");
 const PART_LEAD = new RegExp(`^\\s*(?:${PART})\\b`, "i");
 const PART_ANY = new RegExp(`\\b(?:${PART})\\b`, "i");
 const REPRO = /\b(?:repro|reproduction|replica|replacement|aftermarket)\b/i;

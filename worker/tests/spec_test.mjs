@@ -109,6 +109,25 @@ eq("no set logic on a plain query", c("Singer Featherweight 221 sewing machine",
 eq("accessories mentioned, no count", c("Singer Featherweight 221 sewing machine",
   "Singer Featherweight 221 with Case and Attachments"), false);
 
+// ---- parts/repair, whatever the separator ----
+// A live Featherweight sweep kept this $149.90 listing in a pool of working machines whose
+// median was $400. "Part Or Repair" is "parts/repair" spelled with a word.
+const FW = "Singer Featherweight 221 sewing machine";
+eq("part or repair", c(FW, "Vintage SINGER 221 Featherweight Sewing Machine Part Or Repair"), true);
+eq("parts or repair", c(FW, "Singer 221 Featherweight Sewing Machine Parts Or Repair As Is"), true);
+eq("parts and repair", c(FW, "Singer 221 Featherweight Parts and Repair Lot"), true);
+eq("parts/repair still", c(FW, "Singer 221 Featherweight Sewing Machine Parts/Repair"), true);
+eq("parts & repair still", c(FW, "Singer 221 Featherweight Sewing Machine Parts & Repair"), true);
+eq("repair or parts, reversed", c(FW, "Singer 221 Featherweight Sewing Machine Repair Or Parts"), true);
+eq("for parts still", c(FW, "Singer 221 Featherweight Sewing Machine For Parts"), true);
+// The dealer asking about a broken one keeps them.
+eq("dealer asked for parts", c(FW + " for parts or repair",
+  "Vintage SINGER 221 Featherweight Sewing Machine Part Or Repair"), false);
+// Words that merely sit near each other are not the phrase.
+eq("repaired is not repair-or-parts", c(FW, "Singer 221 Featherweight Professionally Repaired and Serviced"), false);
+eq("part of a collection", c(FW, "Singer Featherweight 221 Part of a Large Estate Collection"), false);
+eq("working machine untouched", c(FW, "Vintage 1936 Singer Featherweight 221 Sewing Machine - RUNNING Motor"), false);
+
 // ---- sizesIn itself ----
 eq("parses gallons", [...(sizesIn("5 gallon crock").get("gal") || [])], [5]);
 eq("parses both units", [...sizesIn('3 gal 12" crock').keys()], ["gal", "in"]);
