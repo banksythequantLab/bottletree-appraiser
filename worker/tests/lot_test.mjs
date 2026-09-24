@@ -90,5 +90,30 @@ eq("no digit, no lot", detectLot("rolls of war nickels", ""), null);
 eq("3 piece carving set is one object", detectLot("3 piece carving set", ""), null);
 eq("4 piece tea service is one object", detectLot("4 piece tea service, silver plate", ""), null);
 
+// ---- an adjective between the number and the piece word ----
+// First real camera run, 2026-09-24. "4 candle sticks made of brass roughly 1/2 a pound each"
+// read as no lot at all, because "candle" sits between the digit and "sticks", so the per-piece
+// arithmetic never ran on a set of four.
+eq("4 candle sticks is a lot of four",
+  detectLot("4 candle sticks made of brass roughly 1/2 a pound each", ""),
+  { count: 4, unit: null, how: "the dealer stated the count" });
+eq("no unit is guessed from the adjective",
+  detectLot("4 wooden sticks from the barn", "").unit, null);
+eq("still works with pcs", detectLot("6 dinner pcs boxed", "").count, 6);
+// The intervening word is allowed before a PIECE word only. These count what the container holds,
+// not how many things there are, and reading them as lots would be wrong.
+eq("4 drawer case is one case", detectLot("4 drawer case oak", ""), null);
+eq("6 bottle crate is one crate", detectLot("6 bottle crate wooden", ""), null);
+eq("2 slice toaster is one toaster", detectLot("2 slice toaster chrome", ""), null);
+// And the rule that has been protecting tube radios all along still holds.
+eq("5 tube radio is still one radio", detectLot("a 1940s 5 tube radio", ""), null);
+// A matched set is not a lot, whichever branch found the count.
+eq("3 piece carving set is still one set", detectLot("3 piece carving set", ""), null);
+eq("4 silver pieces tea service is still one service",
+  detectLot("4 silver pieces tea service", ""), null);
+// KNOWN GAP, recorded rather than guessed at: written as one word it finds nothing, because
+// "candlesticks" is not a piece word and "N <any plural noun>" is far too broad to match safely.
+eq("one-word candlesticks finds no count", detectLot("4 candlesticks brass", ""), null);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -1113,7 +1113,13 @@ const COUNT_RE = new RegExp(
   `(?:\\b(?:lot|set|box|pack|roll|group|case|tray|bag)\\s+of\\s+(\\d{1,3})\\b)` +
   `|(?:\\b(?:qty|quantity)\\s*[:#]?\\s*(\\d{1,3})\\b)` +
   `|(?:\\b(\\d{1,3})\\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count|ct)\\b)` +
-  `|(?:\\b(\\d{1,3})\\s*(${CONTAINER})\\b)`, "i");
+  `|(?:\\b(\\d{1,3})\\s*(${CONTAINER})\\b)` +
+  // One adjective between the number and the piece word. "4 candle sticks" is a lot of four and
+  // was not being read as one, because "candle" sits between the digit and "sticks" - found on
+  // the first real camera run, 2026-09-24. The intervening word is allowed ONLY before a piece
+  // word, never before a container from the list above: "4 drawer case" and "6 bottle crate"
+  // count what the container HOLDS, and reading those as lots of four and six would be wrong.
+  `|(?:\\b(\\d{1,3})\\s+[a-z]{3,}\\s+(?:pcs?|pieces?|sticks?|modules?|units?)\\b)`, "i");
 // "rolls" -> "roll". The unit the dealer counted IN is the unit the comps have to be in.
 // Of the containers above only "boxes" drops -es; "cases" and "crates" drop -s alone. A general
 // -es rule turned "cases" into "cas", which would then be appended to a search query.
@@ -1148,11 +1154,16 @@ export function detectLot(description, markings) {
   const both = `${description || ""} ${markings || ""}`;
   const m = COUNT_RE.exec(both);
   if (m) {
-    const n = Number(m[1] || m[2] || m[3] || m[4]);
+    const n = Number(m[1] || m[2] || m[3] || m[4] || m[6]);
     // m[3] is the "N pieces" branch — the only one that can be describing the parts of a single
     // matched object rather than a quantity of separate ones. m[4] is "N rolls", "N boxes": the
     // container is named, so there is no such ambiguity.
-    const fromPieces = m[3] !== undefined;
+    // m[6] is the new "4 candle sticks" branch. It is a piece word with an adjective in front, so
+    // it carries the same matched-set ambiguity as m[3] - "4 piece carving set" must still not
+    // become a lot of four - and it deliberately returns NO unit. "candle"+"sticks" happens to
+    // join into a real word; "4 wooden sticks" does not, and guessing "woodenstick" as the unit
+    // would put a nonsense word into the eBay query. The count is the part worth having.
+    const fromPieces = m[3] !== undefined || m[6] !== undefined;
     if (n >= 2 && n <= 500 && !(fromPieces && MATCHED_SET.test(both)))
       // The container the dealer counted in — "4 ROLLS" — travels with the count, because the
       // comparables have to be priced in that same unit. Without it, "4 rolls of war nickels"
