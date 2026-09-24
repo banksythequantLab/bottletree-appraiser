@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   ebayActive, ebayFailure, keptLive, splitByPrice, tooWide,
-  MAX_COHERENT_SPREAD, textJson, cfg, REPRICE_SYSTEM,
+  MAX_COHERENT_SPREAD, textJson, cfg, REPRICE_SYSTEM, repricePrompt,
 } from "../appraiser.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -93,6 +93,12 @@ const c = cfg(env);
 let rawWide = 0, keptWide = 0, measured = 0, categories = 0;
 const byCategory = new Map();
 const priceVsMarket = [];
+let fellBack = 0, fellBackOk = 0;
+// The production PRICE_SYSTEM is not exported; this is its text, and the only copy in this file
+// that is allowed to be a copy, because it is three lines and has no per-item substitutions.
+const PRICE_SYSTEM_LOCAL = `You are an antiques dealer setting a retail price. You MUST answer with numbers even when unsure:
+give a wide range rather than zeros. Return ONLY JSON:
+{"low": 0, "high": 0, "suggested_retail": 0, "floor": 0, "currency": "USD", "basis": ""}`;
 const median = ps => { const s = [...ps].sort((a, b) => a - b);
   return s.length % 2 ? s[(s.length - 1) / 2] : Math.round(((s[s.length / 2 - 1] + s[s.length / 2]) / 2) * 100) / 100; };
 
@@ -103,28 +109,17 @@ for (const q of ITEMS) {
   const rawPs = live.map(x => x.price);
   const rawR = ratio(rawPs);
 
-  // Shaped like the production repricer prompt on purpose, and the reason is a mistake worth
-  // keeping written down. An earlier version of this file said "Your earlier estimate: unknown;
-  // price it from the comparables", and only 6-7 of 30 calls came back with a price_range at all.
-  // That looked like a production defect and was not: production hands over a concrete Current
-  // price_range for the model to revise, and matching that wording took it to 30 of 30. A harness
-  // that paraphrases the prompt is measuring the harness.
-  // The seed is deliberately set to 40% of the market median, not to the median itself. Seeding
-  // at the median would make the ratio meaningless - the model could echo it back and look
-  // perfect. Seeding LOW asks the question the second pass exists to answer: handed a prior
-  // estimate well below the listings, does it correct toward them or keep its own number?
-  // A final near 1.0x of median means it corrected. A final near 0.4x means the comparables were
-  // shown to the dealer without having moved the price at all.
-  const SEED_FRACTION = 0.4;
-  const seedMid = Math.max(1, Math.round(median(rawPs) * SEED_FRACTION));
-  const seed = { low: Math.round(seedMid * 0.8), high: Math.round(seedMid * 1.2),
-    suggested_retail: seedMid, floor: Math.round(seedMid * 0.6),
-    currency: "USD", basis: "prior estimate, made before any listing was seen" };
-  const user = `Item: ${JSON.stringify({ name: q })}\nCondition: Very good\n` +
-    `Current price_range: ${JSON.stringify(seed)}\n` +
-    `\nLIVE eBay asking prices right now: ${rawPs.length} listed, $${Math.min(...rawPs)}-` +
-    `$${Math.max(...rawPs)}, median $${median(rawPs)}. These are ASKING prices, not sold prices.\n` +
-    `\nComparables:\n${JSON.stringify(live.map(l => ({ title: l.title, price: l.price, url: l.url, source: "ebay" })), null, 1)}`;
+  // THE production prompt, imported rather than retyped. An earlier version of this file wrote
+  // its own paraphrase - "Your earlier estimate: unknown; price it from the comparables" - and
+  // reported that only 6-7 of 30 calls returned a price_range. That looked like a production
+  // defect and was an artifact of the paraphrase; the real prompt returned 30 of 30. A harness
+  // that rewrites the prompt is measuring the harness, so it does not get to rewrite it.
+  const marketLine = { count: live.length, low: Math.min(...rawPs), high: Math.max(...rawPs),
+    median: median(rawPs) };
+  const user = repricePrompt({
+    ident: { name: q }, condition: "Very good", lotInfo: null, market: marketLine,
+    hits: live.map(l => ({ title: l.title, price: l.price, url: l.url, source: "ebay" })),
+  });
 
   console.log(q);
   console.log(`  raw  ${live.length} listings  $${Math.min(...rawPs)}-$${Math.max(...rawPs)}  ${rawR}x`);
@@ -142,9 +137,23 @@ for (const q of ITEMS) {
       kept = keptLive(live, comps);
       // What the model priced it at, against the pool it was just shown. Nothing in the appraiser
       // currently compares these two numbers, so nobody knows what the normal relationship is.
-      const pr = second.price_range || {};
-      const mid = Number(pr.suggested_retail) || (Number(pr.low) && Number(pr.high)
-        ? (Number(pr.low) + Number(pr.high)) / 2 : 0);
+      const midOf = pr => Number((pr || {}).suggested_retail) ||
+        (Number((pr || {}).low) && Number((pr || {}).high)
+          ? (Number(pr.low) + Number(pr.high)) / 2 : 0);
+      let mid = midOf(second.price_range);
+      // Production's cold fallback, run here too, or this measures only the easy half of the
+      // runs. Priced cold, the repricer answers about 13 times in 30; the other 17 are exactly
+      // the ones a dealer would otherwise get a pre-listing memory for.
+      if (!(mid > 0)) {
+        fellBack++;
+        const coldAsk = `Item: ${q}\nCondition: Very good\nCurrency: USD\n` +
+          `Live asking prices right now: ${live.length} listed, $${Math.min(...rawPs)}-` +
+          `$${Math.max(...rawPs)}, median $${median(rawPs)}. Asking, not sold.\n` +
+          `\nComparables:\n${JSON.stringify(live.slice(0, 8).map(l => ({ title: l.title, price: l.price })), null, 1)}\n\n` +
+          `Set a dealer retail range from these listings alone.`;
+        try { mid = midOf(await textJson(c, PRICE_SYSTEM_LOCAL, coldAsk, 300)); } catch { /* counted below */ }
+        if (mid > 0) fellBackOk++;
+      }
       if (mid > 0) priced = mid;
     } catch (e) { console.log(`  run ${i + 1}: repricer failed: ${e.message}`); continue; }
 
@@ -197,37 +206,46 @@ if (times > 1) {
 // coherence test against the market. The price does not. Before a guard can be written, somebody
 // has to know what NORMAL looks like, and nobody did.
 //
-// MEASURED, 2026-09-24, ten categories x three runs, every run seeded at 0.40x of its own market
-// median:
+// MEASURED, 2026-09-24, ten categories x three runs each, three times over.
 //
-//   returned a price      30/30
-//   final / median        min 0.29x   p50 0.69x   p90 1.01x   max 1.10x
-//   pulled up to >=0.70x  14/30
+//   WITH a prior seeded at 0.40x of the market median (what production used to do):
+//     returned a price    30/30
+//     final / median      min 0.29x   p50 0.69x   p90 1.01x   max 1.10x
+//     at or above 0.70x   14/30
+//   The pass anchored on the number it was handed and recovered about half the distance to the
+//   listings in front of it. $140 against a $349.99 median, $200 against $492.88, $16 against
+//   $39.25. One went backwards: $165 against a $562.50 median, BELOW the $225 it started from.
+//   In production that prior was the first pass's own guess, formed before any listing was seen,
+//   so a bad first guess survived into the final number instead of being corrected by evidence.
 //
-// The second pass anchors hard on the prior. Handed an estimate 2.5x below the listings it was
-// shown, it recovers only about half the gap, and in several runs it did not move at all:
-// $140 against a $349.99 median, $200 against $492.88, $16 against $39.25. One went the wrong
-// way entirely - $165 against a $562.50 median, BELOW the $225 it started from.
+//   COLD, no prior, repricer alone:
+//     returned a price    13/30      <- withholding the number also withholds the answer
+//     final / median      min 0.83x   p50 1.01x   p90 1.26x   max 1.74x
 //
-// That matters because in production the prior is the first pass's own guess, made before any
-// listing was seen. A first-pass underestimate is not corrected by showing the model the market;
-// it is roughly halved. This is the same shape as the $260-against-$585 failure, and it is the
-// place the remaining price error actually lives.
+//   COLD, with the pricing-only fallback production now runs when the repricer declines:
+//     returned a price    30/30      (repricer declined 16, fallback rescued all 16)
+//     final / median      min 0.72x   p50 1.01x   p90 1.15x   max 1.27x
+//     at or above 0.70x   30/30
 //
-// The 0.40x seed is artificial, so these ratios are NOT a distribution of healthy production
-// runs and no threshold should be fitted to them. What they establish is the anchoring, which is
-// a property of the pass rather than of the seed.
+// Every price now sits in a tight band around the market it was priced from, and the
+// $165-against-$562 shape is gone from this sample.
+//
+// This last set IS a distribution of healthy production runs - unseeded, production prompt, real
+// listings - so unlike the seeded numbers it is a legitimate basis for a coherence threshold, if
+// one is ever wanted. Thirty runs across ten categories in one day is still a thin basis for
+// picking one, and none has been picked.
 if (priceVsMarket.length) {
   const rs = priceVsMarket.map(x => x.ratio).sort((a, b) => a - b);
   const pct = p => rs[Math.min(rs.length - 1, Math.floor(p * rs.length))];
-  console.log(`--- does the second pass correct a deliberately low prior? ---`);
-  console.log(`every run was seeded at 0.40x of its own market median.`);
-  console.log(`${rs.length} of ${measured} runs returned a price at all` +
-    `${rs.length < measured ? "  <<< the rest silently kept the seed" : ""}`);
+  console.log(`--- where does the price land, priced from the comps COLD? ---`);
+  console.log(`no prior estimate is handed to the model; production does not pass one either.`);
+  console.log(`${rs.length} of ${measured} runs ended with a price, after the cold fallback.`);
+  console.log(`the repricer itself declined on ${fellBack} of them; the fallback rescued ${fellBackOk}.`);
   console.log(`final price / market median:   min ${rs[0].toFixed(2)}x   p50 ${pct(0.5).toFixed(2)}x   ` +
     `p90 ${pct(0.9).toFixed(2)}x   max ${rs[rs.length - 1].toFixed(2)}x`);
-  const corrected = rs.filter(r => r >= 0.7).length;
-  console.log(`${corrected}/${rs.length} landed at 0.70x of median or above, i.e. pulled up off the seed`);
+  const near = rs.filter(r => r >= 0.7).length;
+  console.log(`${near}/${rs.length} landed at 0.70x of median or above`);
+  console.log(`the seeded run this replaces, for comparison: p50 0.69x, 14/30 at or above 0.70x`);
   const worst = [...priceVsMarket].sort((a, b) =>
     Math.max(b.ratio, 1 / b.ratio) - Math.max(a.ratio, 1 / a.ratio)).slice(0, 5);
   console.log(`furthest from its own comparables:`);

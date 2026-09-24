@@ -77,13 +77,43 @@ FIELD GUIDE (do not copy these sentences into the JSON):
 EXAMPLE of a filled answer for a different item (format only):
 {"identification":{"name":"Red Wing 3-gallon stoneware crock","category":"Stoneware","maker":"Red Wing Union Stoneware Co.","origin":"Red Wing, Minnesota, USA","period":"c. 1915-1930","style":"Utilitarian salt-glaze"},"confidence":0.85,"evidence":["Red Wing oval stamp on face - factory-marked, post-1906 union period","Cobalt '3' capacity mark matches 3-gallon body size"],"transcribed_text":["RED WING UNION STONEWARE CO.","3"],"price_range":{"low":90,"high":160,"suggested_retail":135,"floor":90,"currency":"USD","basis":"Common marked Red Wing size; hairline would drop it to the low end."},"listing":{"title":"Red Wing 3-Gallon Stoneware Crock, Union Stoneware Co., c. 1920","description":"A classic Red Wing 3-gallon crock with the oval Union Stoneware stamp and a cobalt 3. Sturdy salt-glazed body with the warm patina these pieces earn in a century of farmhouse use.\\n\\nRim and base are sound. A handsome piece for a kitchen counter, utensil storage or a farmhouse display.","tags":["red wing","stoneware","crock","farmhouse"],"condition_grade":"Very good"},"questions_for_dealer":["Any hairlines or chips on the rim or base?"]}`;
 
-export const REPRICE_SYSTEM = `You are a senior antiques appraiser. You previously appraised an item; now you have live
-comparable listings from the web. Comparables may be irrelevant or asking (not sold) prices - weigh them
-accordingly. Return ONLY a JSON object: {"price_range": {...same shape...}, "comparables": [{"title","price","url","source","note"}],
+// The user half of the repricing call, exported so the measurement harness runs the EXACT prompt
+// production runs. It is exported because paraphrasing it once already cost a day: a harness that
+// said "your earlier estimate: unknown" where production said "Current price_range: {...}"
+// reported 7 of 30 calls returning no price, which looked like a production defect and was an
+// artifact of the paraphrase.
+//
+// COLD COMPS, 2026-09-24. The earlier estimate is deliberately NOT passed any more. Measured with
+// tools/kept_pool_check.mjs: seeded with a prior at 0.40x of the market median, the pass returned
+// a final price at a median of 0.69x of that median, and 16 of 30 runs never climbed above 0.70x.
+// One came back at $165 against a $562.50 median, BELOW the $225 it had been given. Handed a
+// number, this model treats it as an anchor and recovers about half the distance to the market.
+//
+// In production that anchor is the first pass's own guess, formed before a single listing was
+// seen, so a bad first guess survived into the final number rather than being corrected by the
+// evidence. The listings are the better evidence; the prior is a memory. So the prior is withheld
+// and the price is formed from the comparables cold.
+export function repricePrompt({ ident, condition, lotInfo, market, hits }) {
+  return `Item: ${JSON.stringify(ident)}\nCondition: ${condition || "Unknown"}\n` +
+    `\nYou are pricing this from the live listings below and from nothing else. You are NOT being\n` +
+    `given an earlier estimate to adjust, because an earlier estimate made before these listings\n` +
+    `were seen is a memory and these are today's market. Set price_range from this evidence.\n` +
+    (lotInfo ? `\nThis is a lot of ${lotInfo.count} identical pieces, and price_range is the price ` +
+      `of ONE PIECE. Keep it that way. The comparables below are per-piece listings, so they are ` +
+      `directly comparable. Do NOT multiply by ${lotInfo.count}.\n` : "") +
+    (market ? `\nLIVE eBay asking prices right now: ${market.count} listed, ` +
+      `$${market.low}-$${market.high}, median $${market.median}. These are ASKING prices, not sold ` +
+      `prices, so a dealer's retail sits near or above them rather than far below.\n` : "") +
+    `\nComparables:\n${JSON.stringify(hits, null, 1)}`;
+}
+
+export const REPRICE_SYSTEM = `You are a senior antiques appraiser pricing an item against live comparable listings from
+the web. Comparables may be irrelevant or asking (not sold) prices - weigh them accordingly.
+Return ONLY a JSON object: {"price_range": {...same shape...}, "comparables": [{"title","price","url","source","note"}],
 "basis_note": "one sentence", "rejected": [{"title","why"}]}.
 "price_range" is REQUIRED on every answer, never omitted and never null, even when the comparables
-are poor or you are repeating your earlier figure unchanged. Omitting it does not mean "no change";
-it means the estimate made before any listing was seen is what the dealer gets.
+are poor. You are not revising a previous figure; you are setting one from the listings you have
+been given, so there is no "unchanged" to fall back on.
 Keep at most 4 comparables that are actually similar.
 Every comparable you were given that you do NOT keep must appear in "rejected" with a short, concrete
 reason - "Riviera, a different Homer Laughlin line", "divided plate, not a dinner plate", "rare Pumpkin
@@ -1514,16 +1544,7 @@ export async function appraise(env, req) {
     warnings.push(`no eBay listing matched the full description, so these prices are for ` +
       `"${broadenedTo}" — comparable items rather than this exact one.`);
   if (hits.length) {
-    const repriceUser = `Item: ${JSON.stringify(ident)}\nCondition: ${listing.condition_grade}\n` +
-      `Current price_range: ${JSON.stringify(price)}\n` +
-      (lotInfo ? `\nThis is a lot of ${lotInfo.count} identical pieces, and price_range is the price ` +
-        `of ONE PIECE. Keep it that way. The comparables below are per-piece listings, so they are ` +
-        `directly comparable. Do NOT multiply by ${lotInfo.count}.\n` : "") +
-      (market ? `\nLIVE eBay asking prices right now: ${market.count} listed, ` +
-        `$${market.low}-$${market.high}, median $${market.median}. These are ASKING prices, not sold ` +
-        `prices, so they run high — but they are today's market, and your own estimate is a memory. ` +
-        `If your range sits well below these, raise it.\n` : "") +
-      `\nComparables:\n${JSON.stringify(hits, null, 1)}`;
+    const repriceUser = repricePrompt({ ident, condition: listing.condition_grade, lotInfo, market, hits });
     try {
       const second = await textJson(c, REPRICE_SYSTEM, repriceUser, 1000);
       // The whole promise of this second pass is that the price gets re-set against real listings.
@@ -1531,16 +1552,42 @@ export async function appraise(env, req) {
       // does not happen: the first-pass estimate - made before any listing was seen - stands, while
       // the card goes on to show the comparables underneath it as though they had informed it.
       //
-      // I first measured this at 7 of 30 calls returning a price_range and nearly reported it as
-      // a production defect. It was my own harness: it told the model "your earlier estimate:
-      // unknown", where production hands over a concrete Current price_range to revise. Matching
-      // the production wording took it to 30 of 30. So this is a backstop against a case that has
-      // never actually been seen, not a fix for a known one - which is the honest reason to make
-      // it observable rather than to assume either way.
+      // I got the cause of this wrong twice, so here is the whole sequence. Measured 7/30 with a
+      // harness that paraphrased the prompt, and wrote it up as a production defect. Matched the
+      // production wording, got 30/30, and wrote it up as a pure paraphrasing artifact. Then
+      // removed the prior for real and got 13/30 - so it was never the paraphrase. What decides
+      // whether this model answers with a price is whether it was handed a number to revise.
+      //
+      //   prompt WITH a prior    30/30 answer, but anchored: p50 0.69x of the comps' median
+      //   prompt WITHOUT a prior 13/30 answer, and well calibrated: p50 1.01x, min 0.83x
+      //
+      // Both halves are real, and they trade against each other. The prior buys an answer every
+      // time and poisons it; withholding it buys a good answer less than half the time. Hence the
+      // cold fallback below rather than a choice between the two.
       if (second.price_range) price = priceOf(second.price_range, currency);
-      else warnings.push(`the comparables below were found and judged, but the pricing pass returned ` +
-        `no price of its own, so the figure above is still the estimate made before any listing ` +
-        `was seen. Treat the comparables as the better evidence.`);
+      else {
+        // Withholding the prior is what makes the price well-calibrated, and it is also what
+        // makes the model decline to answer: 13 of 30 cold runs returned a price_range where 30
+        // of 30 did when handed a prior to revise. Falling back to the first-pass estimate here
+        // would hand the dealer exactly the pre-listing memory this change exists to get rid of.
+        // So the fallback is a second COLD ask - a pricing-only call over the same comparables,
+        // with no prior in it either.
+        const cold = `Item: ${ident.name}\nCondition: ${listing.condition_grade || "Good"}\n` +
+          `Currency: ${currency}\n` +
+          (market ? `Live asking prices right now: ${market.count} listed, $${market.low}-$${market.high}, ` +
+            `median $${market.median}. Asking, not sold.\n` : "") +
+          `\nComparables:\n${JSON.stringify(hits.slice(0, 8), null, 1)}\n\n` +
+          `Set a dealer retail range from these listings alone.`;
+        try {
+          const p3 = priceOf(await textJson(c, PRICE_SYSTEM, cold, 300), currency);
+          if (p3.high > 0) { price = p3; warnings.push("price was set by a second pass over the comparables"); }
+          else throw new Error("no price");
+        } catch {
+          warnings.push(`the comparables below were found and judged, but neither pricing pass returned ` +
+            `a price, so the figure above is still the estimate made before any listing was seen. ` +
+            `Treat the comparables as the better evidence.`);
+        }
+      }
       if (second.basis_note) price.basis = (price.basis + " " + String(second.basis_note)).trim();
       for (const cp of (second.comparables || []).slice(0, 4))
         if (cp && typeof cp === "object" && cp.title) comparables.push(pick(cp, COMP_KEYS));
