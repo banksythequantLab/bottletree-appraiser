@@ -313,7 +313,15 @@ function renderItems() {
       <div style="height:8px"></div>
       <div class="row" style="gap:8px;align-items:center">
         <button class="btn sec sm" id="iCam" style="display:none">📷 Photo</button>
-        <label class="btn sec sm" style="display:inline-block;margin:0">Choose photos<input type="file" accept="image/*" multiple hidden id="iFiles"></label>
+        <!-- Not accept="image/*". An iPhone writes HEIC by default, and with a wildcard accept
+             iOS hands the HEIC over untouched: the browser cannot decode it, shrink() passes it
+             through at full size, the blur gate measures null and waves it past, and the vision
+             model is handed a .heic URL it cannot read. Measured 2026-09-24 end to end - the
+             appraisal came back "vision model failed on every photo; appraisal relies on dealer
+             text only" and every line of its evidence began "Dealer reports". The paid feature
+             silently became a text guesser for anyone on an iPhone.
+             Naming the formats explicitly makes iOS transcode to JPEG as it hands the file over. -->
+        <label class="btn sec sm" style="display:inline-block;margin:0">Choose photos<input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden id="iFiles"></label>
         <span class="muted" id="iCount" style="font-size:.82rem"></span>
       </div>
       <div id="iThumbs" class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px"></div>
@@ -566,6 +574,18 @@ async function sharpness(file) {
 // Hand a blurry photo back before it is uploaded. The dealer is standing in front of the item
 // with the camera in their hand; that is the only moment a retake is cheap.
 async function acceptPhoto(file, what = "photo") {
+  // The accept list on the file input should mean this never arrives, but a drag-and-drop, an
+  // Android HEIC or a future browser can still produce one, and a HEIC that gets through is not
+  // a degraded appraisal - it is no appraisal at all, dressed up as one. The vision model cannot
+  // read it, so the card comes back priced from the dealer's sentence alone. Better to say so
+  // while they are still standing in front of the item.
+  if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name || "")) {
+    alert(
+      `That photo is in Apple's HEIC format, and the appraiser cannot read it — ` +
+      `it would price the item from your description alone.\n\n` +
+      `On iPhone: Settings > Camera > Formats > Most Compatible. Then take the photo again.`);
+    return null;
+  }
   const s = await sharpness(file);
   if (s === null || s >= SOFT) return file;
   if (s >= BLURRY) { toast(`That ${what} is a little soft — a sharper one reads better.`); return file; }
