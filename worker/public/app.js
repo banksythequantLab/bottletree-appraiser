@@ -452,12 +452,12 @@ function renderCapture() {
   app.innerHTML = `<h1 class="h1">Add item with AI</h1>
     <div class="muted" style="font-size:.85rem;margin-bottom:6px">Take the shots you can. The marks photo matters most.</div>
     <div class="card"><div class="shots" id="shots">${SHOTS.map(s => `
-      <div class="shot" data-kind="${s.kind}"><input type="file" accept="image/*" capture="environment" hidden>
+      <div class="shot" data-kind="${s.kind}"><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden>
         <div class="ph" id="ph-${s.kind}">📷</div><div class="sl">${s.label}</div><div class="sh">${s.hint}</div>
         <a href="#" class="pick" style="font-size:.64rem;color:var(--sub);text-decoration:underline">choose file</a></div>`).join("")}</div>
       <div style="height:8px"></div>
       <button class="btn sec sm" id="moreCam" style="display:none">📷 Another photo</button>
-      <label class="btn sec sm" style="display:inline-block">+ More photos <input type="file" accept="image/*" multiple hidden id="moreShots"></label>
+      <label class="btn sec sm" style="display:inline-block">+ More photos <input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden id="moreShots"></label>
       <span class="muted" id="moreCount" style="font-size:.82rem;margin-left:8px"></span>
     </div>
     <div class="card">
@@ -574,17 +574,24 @@ async function sharpness(file) {
 // Hand a blurry photo back before it is uploaded. The dealer is standing in front of the item
 // with the camera in their hand; that is the only moment a retake is cheap.
 async function acceptPhoto(file, what = "photo") {
-  // The accept list on the file input should mean this never arrives, but a drag-and-drop, an
-  // Android HEIC or a future browser can still produce one, and a HEIC that gets through is not
-  // a degraded appraisal - it is no appraisal at all, dressed up as one. The vision model cannot
-  // read it, so the card comes back priced from the dealer's sentence alone. Better to say so
-  // while they are still standing in front of the item.
-  if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name || "")) {
-    alert(
-      `That photo is in Apple's HEIC format, and the appraiser cannot read it — ` +
-      `it would price the item from your description alone.\n\n` +
-      `On iPhone: Settings > Camera > Formats > Most Compatible. Then take the photo again.`);
-    return null;
+  // A HEIC is converted here rather than refused, because on iOS - where HEICs come from - the
+  // browser can decode it and shrink() now produces a JPEG. Only if that genuinely failed is the
+  // dealer told, and then it is told as something they can act on. Refusing every HEIC on sight
+  // would block photos that this device could have handled perfectly well.
+  //
+  // A HEIC that gets through is not a degraded appraisal, it is no appraisal at all dressed up
+  // as one: the vision model reads nothing and the card comes back priced from the dealer's
+  // sentence, with every line of its evidence beginning "Dealer reports".
+  if (isHeic(file)) {
+    const converted = await shrink(file);
+    if (!isHeic(converted)) { file = converted; }
+    else {
+      alert(
+        `That photo is in Apple's HEIC format and this browser cannot convert it, so the ` +
+        `appraiser would price the item from your description alone.\n\n` +
+        `On iPhone: Settings > Camera > Formats > Most Compatible. Then take the photo again.`);
+      return null;
+    }
   }
   const s = await sharpness(file);
   if (s === null || s >= SOFT) return file;
@@ -598,12 +605,28 @@ async function acceptPhoto(file, what = "photo") {
 }
 
 // downscale to <=1600px JPEG so uploads are quick on cell data
+// The HEIC early-return that used to be on the next line was the whole bug. It refused to even
+// attempt a HEIC - and iOS Safari, the one browser a HEIC actually arrives from, decodes HEIC
+// natively. So on the device where the problem exists, the fix was one line away and we were
+// declining to take it. On a browser that genuinely cannot decode HEIC the createImageBitmap
+// below throws and the catch returns the file untouched, which is exactly the old behaviour.
+//
+// isHeic() is therefore a question about the OUTPUT, never the input: did this actually come out
+// as a JPEG? That is the only version of the question worth asking, because the answer differs
+// by browser and guessing it from the file name is how this got missed.
+function isHeic(file) {
+  return /heic|heif/i.test(file && file.type || "") || /\.hei[cf]$/i.test(file && file.name || "");
+}
+
 async function shrink(file, max = 1600) {
-  if (!file.type.startsWith("image/") || file.type === "image/heic") return file;
+  if (!file.type.startsWith("image/") && !isHeic(file)) return file;
   try {
     const bmp = await createImageBitmap(file);
     const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
-    if (s === 1 && file.size < 2.5e6) return file;
+    // A small JPEG needs nothing doing to it. A small HEIC still has to be re-encoded, because
+    // the point is the format and not the size - returning it here is how a 2MB iPhone photo
+    // would have slipped through the fix.
+    if (s === 1 && file.size < 2.5e6 && !isHeic(file)) return file;
     const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
     c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
     const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.86));
