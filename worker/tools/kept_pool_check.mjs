@@ -92,6 +92,7 @@ if (/^SBX-/i.test(env.EBAY_CLIENT_ID)) {
 const c = cfg(env);
 let rawWide = 0, keptWide = 0, measured = 0, categories = 0;
 const byCategory = new Map();
+const priceVsMarket = [];
 const median = ps => { const s = [...ps].sort((a, b) => a - b);
   return s.length % 2 ? s[(s.length - 1) / 2] : Math.round(((s[s.length / 2 - 1] + s[s.length / 2]) / 2) * 100) / 100; };
 
@@ -102,9 +103,27 @@ for (const q of ITEMS) {
   const rawPs = live.map(x => x.price);
   const rawR = ratio(rawPs);
 
-  // The production repricer prompt, minus the identification preamble the model does not need
-  // when the query IS the identification.
-  const user = `Item: ${q}\nYour earlier estimate: unknown; price it from the comparables.\n` +
+  // Shaped like the production repricer prompt on purpose, and the reason is a mistake worth
+  // keeping written down. An earlier version of this file said "Your earlier estimate: unknown;
+  // price it from the comparables", and only 6-7 of 30 calls came back with a price_range at all.
+  // That looked like a production defect and was not: production hands over a concrete Current
+  // price_range for the model to revise, and matching that wording took it to 30 of 30. A harness
+  // that paraphrases the prompt is measuring the harness.
+  // The seed is deliberately set to 40% of the market median, not to the median itself. Seeding
+  // at the median would make the ratio meaningless - the model could echo it back and look
+  // perfect. Seeding LOW asks the question the second pass exists to answer: handed a prior
+  // estimate well below the listings, does it correct toward them or keep its own number?
+  // A final near 1.0x of median means it corrected. A final near 0.4x means the comparables were
+  // shown to the dealer without having moved the price at all.
+  const SEED_FRACTION = 0.4;
+  const seedMid = Math.max(1, Math.round(median(rawPs) * SEED_FRACTION));
+  const seed = { low: Math.round(seedMid * 0.8), high: Math.round(seedMid * 1.2),
+    suggested_retail: seedMid, floor: Math.round(seedMid * 0.6),
+    currency: "USD", basis: "prior estimate, made before any listing was seen" };
+  const user = `Item: ${JSON.stringify({ name: q })}\nCondition: Very good\n` +
+    `Current price_range: ${JSON.stringify(seed)}\n` +
+    `\nLIVE eBay asking prices right now: ${rawPs.length} listed, $${Math.min(...rawPs)}-` +
+    `$${Math.max(...rawPs)}, median $${median(rawPs)}. These are ASKING prices, not sold prices.\n` +
     `\nComparables:\n${JSON.stringify(live.map(l => ({ title: l.title, price: l.price, url: l.url, source: "ebay" })), null, 1)}`;
 
   console.log(q);
@@ -115,12 +134,18 @@ for (const q of ITEMS) {
   // The live pool is fetched once and reused for every repeat, so any difference below is the
   // repricer changing its mind, not the market moving.
   for (let i = 0; i < times; i++) {
-    let kept = [], rejected = [];
+    let kept = [], rejected = [], priced = null;
     try {
       const second = await textJson(c, REPRICE_SYSTEM, user, 1000);
       const comps = (second.comparables || []).slice(0, 4).filter(x => x && x.title);
       rejected = (second.rejected || []).filter(r => r && r.title);
       kept = keptLive(live, comps);
+      // What the model priced it at, against the pool it was just shown. Nothing in the appraiser
+      // currently compares these two numbers, so nobody knows what the normal relationship is.
+      const pr = second.price_range || {};
+      const mid = Number(pr.suggested_retail) || (Number(pr.low) && Number(pr.high)
+        ? (Number(pr.low) + Number(pr.high)) / 2 : 0);
+      if (mid > 0) priced = mid;
     } catch (e) { console.log(`  run ${i + 1}: repricer failed: ${e.message}`); continue; }
 
     measured++;
@@ -135,7 +160,9 @@ for (const q of ITEMS) {
     if (warns) keptWide++;
     // The kept set's identity, for counting how often the model picks the same four.
     if (!byCategory.has(q)) byCategory.set(q, []);
-    byCategory.get(q).push({ key: [...ps].sort((a, b) => a - b).join(","), median: median(ps) });
+    const med = median(ps);
+    byCategory.get(q).push({ key: [...ps].sort((a, b) => a - b).join(","), median: med });
+    if (priced && med > 0) priceVsMarket.push({ q, priced, med, ratio: priced / med });
     console.log(`${tag}kept ${ps.length} listings  $${Math.min(...ps)}-$${Math.max(...ps)}  ${ratio(ps)}x` +
       `${warns ? "   <<< tooWide WARNS" : ""}${splitByPrice(kept) ? "   [splitByPrice fires]" : ""}`);
     // With a filter argument, print what was KEPT as well. A spread number cannot tell you
@@ -163,6 +190,52 @@ if (times > 1) {
       `$${lo}-$${hi}`.padEnd(16) + `  ${lo > 0 ? Math.round((hi / lo) * 100) / 100 + "x" : "-"}`);
   }
   console.log();
+}
+
+// The one relationship in the appraiser that nothing checks: what the model priced the item at,
+// against the median of the very comparables it was shown a moment earlier. The melt check has a
+// coherence test against the market. The price does not. Before a guard can be written, somebody
+// has to know what NORMAL looks like, and nobody did.
+//
+// MEASURED, 2026-09-24, ten categories x three runs, every run seeded at 0.40x of its own market
+// median:
+//
+//   returned a price      30/30
+//   final / median        min 0.29x   p50 0.69x   p90 1.01x   max 1.10x
+//   pulled up to >=0.70x  14/30
+//
+// The second pass anchors hard on the prior. Handed an estimate 2.5x below the listings it was
+// shown, it recovers only about half the gap, and in several runs it did not move at all:
+// $140 against a $349.99 median, $200 against $492.88, $16 against $39.25. One went the wrong
+// way entirely - $165 against a $562.50 median, BELOW the $225 it started from.
+//
+// That matters because in production the prior is the first pass's own guess, made before any
+// listing was seen. A first-pass underestimate is not corrected by showing the model the market;
+// it is roughly halved. This is the same shape as the $260-against-$585 failure, and it is the
+// place the remaining price error actually lives.
+//
+// The 0.40x seed is artificial, so these ratios are NOT a distribution of healthy production
+// runs and no threshold should be fitted to them. What they establish is the anchoring, which is
+// a property of the pass rather than of the seed.
+if (priceVsMarket.length) {
+  const rs = priceVsMarket.map(x => x.ratio).sort((a, b) => a - b);
+  const pct = p => rs[Math.min(rs.length - 1, Math.floor(p * rs.length))];
+  console.log(`--- does the second pass correct a deliberately low prior? ---`);
+  console.log(`every run was seeded at 0.40x of its own market median.`);
+  console.log(`${rs.length} of ${measured} runs returned a price at all` +
+    `${rs.length < measured ? "  <<< the rest silently kept the seed" : ""}`);
+  console.log(`final price / market median:   min ${rs[0].toFixed(2)}x   p50 ${pct(0.5).toFixed(2)}x   ` +
+    `p90 ${pct(0.9).toFixed(2)}x   max ${rs[rs.length - 1].toFixed(2)}x`);
+  const corrected = rs.filter(r => r >= 0.7).length;
+  console.log(`${corrected}/${rs.length} landed at 0.70x of median or above, i.e. pulled up off the seed`);
+  const worst = [...priceVsMarket].sort((a, b) =>
+    Math.max(b.ratio, 1 / b.ratio) - Math.max(a.ratio, 1 / a.ratio)).slice(0, 5);
+  console.log(`furthest from its own comparables:`);
+  for (const w of worst)
+    console.log(`  ${w.ratio.toFixed(2)}x  $${Math.round(w.priced)} priced against a $${w.med} median   ${w.q.slice(0, 40)}`);
+  console.log(`A number well above 1x is expected and healthy: these are ASKING prices and the`);
+  console.log(`model is setting dealer retail. What a guard would be for is the far tail - a`);
+  console.log(`price with no visible relationship to the pool it was priced from.\n`);
 }
 
 console.log(`--- ${categories} categories, ${measured} repricer runs, threshold ${MAX_COHERENT_SPREAD}x ---`);

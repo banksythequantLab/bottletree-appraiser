@@ -81,6 +81,9 @@ export const REPRICE_SYSTEM = `You are a senior antiques appraiser. You previous
 comparable listings from the web. Comparables may be irrelevant or asking (not sold) prices - weigh them
 accordingly. Return ONLY a JSON object: {"price_range": {...same shape...}, "comparables": [{"title","price","url","source","note"}],
 "basis_note": "one sentence", "rejected": [{"title","why"}]}.
+"price_range" is REQUIRED on every answer, never omitted and never null, even when the comparables
+are poor or you are repeating your earlier figure unchanged. Omitting it does not mean "no change";
+it means the estimate made before any listing was seen is what the dealer gets.
 Keep at most 4 comparables that are actually similar.
 Every comparable you were given that you do NOT keep must appear in "rejected" with a short, concrete
 reason - "Riviera, a different Homer Laughlin line", "divided plate, not a dinner plate", "rare Pumpkin
@@ -1523,7 +1526,21 @@ export async function appraise(env, req) {
       `\nComparables:\n${JSON.stringify(hits, null, 1)}`;
     try {
       const second = await textJson(c, REPRICE_SYSTEM, repriceUser, 1000);
+      // The whole promise of this second pass is that the price gets re-set against real listings.
+      // When the model answers with comparables and a basis note but NO price_range, that silently
+      // does not happen: the first-pass estimate - made before any listing was seen - stands, while
+      // the card goes on to show the comparables underneath it as though they had informed it.
+      //
+      // I first measured this at 7 of 30 calls returning a price_range and nearly reported it as
+      // a production defect. It was my own harness: it told the model "your earlier estimate:
+      // unknown", where production hands over a concrete Current price_range to revise. Matching
+      // the production wording took it to 30 of 30. So this is a backstop against a case that has
+      // never actually been seen, not a fix for a known one - which is the honest reason to make
+      // it observable rather than to assume either way.
       if (second.price_range) price = priceOf(second.price_range, currency);
+      else warnings.push(`the comparables below were found and judged, but the pricing pass returned ` +
+        `no price of its own, so the figure above is still the estimate made before any listing ` +
+        `was seen. Treat the comparables as the better evidence.`);
       if (second.basis_note) price.basis = (price.basis + " " + String(second.basis_note)).trim();
       for (const cp of (second.comparables || []).slice(0, 4))
         if (cp && typeof cp === "object" && cp.title) comparables.push(pick(cp, COMP_KEYS));
