@@ -1,7 +1,7 @@
 // Run:  node worker/tests/questions_test.mjs
 // Turning what the model asks into something a dealer can answer with a tap, and degrading to a
 // text box when the model ignores the new field — which is a routine event, not an emergency.
-import { dealerQuestions } from "../appraiser.js";
+import { dealerQuestions, cleanQuestion } from "../appraiser.js";
 
 let pass = 0, fail = 0;
 const eq = (n, got, want) => {
@@ -48,6 +48,41 @@ eq("long question truncated", dealerQuestions({
 eq("no questions", dealerQuestions({}), []);
 eq("null input", dealerQuestions(null), []);
 eq("dealer_questions not an array", dealerQuestions({ dealer_questions: { q: "x" } }), []);
+
+// ---- cleanQuestion: the options do not belong in the question ----
+// Production, 2026-09-24, the candlestick run. This exact string went onto the card and into the
+// uncertainty warning, so the dealer read a comma-separated list glued to the end of a question
+// while the same options sat underneath it as buttons.
+eq("strips an options tail after the question mark",
+  cleanQuestion("Are the items four separate candlesticks or a single multi-arm candelabra? - Four separate sticks,Single candelabra,Unsure"),
+  "Are the items four separate candlesticks or a single multi-arm candelabra?");
+eq("em dash too",
+  cleanQuestion("Does a magnet stick to the base? — Yes,No,Can't tell"),
+  "Does a magnet stick to the base?");
+eq("a clean question is untouched",
+  cleanQuestion("Any hairlines or chips on the rim or base?"),
+  "Any hairlines or chips on the rim or base?");
+eq("only the first question survives",
+  cleanQuestion("Is there a stamp? Where is it?"), "Is there a stamp?");
+eq("a question mark inside the question still cuts at the first one",
+  cleanQuestion("Is it marked 'Made in USA'? Yes or no"), "Is it marked 'Made in USA'?");
+// No question mark at all: keep the instruction, drop a dangling list.
+eq("imperative with an options tail",
+  cleanQuestion("Tell us the height in inches - under 6,6 to 10,over 10"),
+  "Tell us the height in inches");
+eq("imperative with no list is untouched",
+  cleanQuestion("A close, sharp photo of the stamp on the base"),
+  "A close, sharp photo of the stamp on the base");
+eq("a hyphenated phrase with no comma is not a list",
+  cleanQuestion("Send a photo of the salt-glazed side"),
+  "Send a photo of the salt-glazed side");
+eq("empty", cleanQuestion(""), "");
+eq("undefined", cleanQuestion(undefined), "");
+// And it is actually applied to the chips the dealer taps.
+eq("dealerQuestions cleans the q it returns",
+  dealerQuestions({ dealer_questions: [{ q: "Solid brass or plated? - Solid,Plated,Can't tell",
+                                         options: ["Solid", "Plated", "Can't tell"] }] }),
+  [{ q: "Solid brass or plated?", options: ["Solid", "Plated", "Can't tell"] }]);
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

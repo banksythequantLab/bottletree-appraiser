@@ -57,7 +57,9 @@ FIELD GUIDE (do not copy these sentences into the JSON):
   floor = lowest you'd accept; basis = one plain sentence on how you priced it.
 - listing.title: <= 80 chars, searchable (maker, period, type). listing.description: 2-3 short paragraphs for a shop website.
 - listing.condition_grade: one of Excellent, Very good, Good, Fair, Poor, As-is.
-- questions_for_dealer: 1-2 things that would most change the appraisal if known.
+- questions_for_dealer: 1-2 things that would most change the appraisal if known. Each is ONE
+  plain question ending in a question mark and NOTHING else. Never append the possible answers to
+  it - they belong in dealer_questions.options, and the dealer sees them as buttons already.
 - If the photographs do not settle what the item is — out of focus, too far away, the wrong face of
   the object, a detail you cannot read — say so plainly in confidence AND make the FIRST entry in
   questions_for_dealer the single specific photograph that would settle it: which face, which mark,
@@ -673,18 +675,41 @@ export function shouldGate(idConflict, confidence, corroborated) {
 // a model that ignores a new field is a routine event, not an emergency — so the plain
 // questions_for_dealer strings are the fallback, and the card simply shows a text box for those.
 // Nothing here fails if dealer_questions never arrives.
+// The model is asked for a plain question in `questions_for_dealer` and for its tappable options
+// separately in `dealer_questions`. It does not always keep them apart. Production, 2026-09-24,
+// the candlestick run: questions_for_dealer[0] came back as
+//
+//   "Are the items four separate candlesticks or a single multi-arm candelabra? - Four separate
+//    sticks,Single candelabra,Unsure"
+//
+// and that whole string went onto the card AND into the uncertainty warning, so the dealer read
+// a question with an unlabelled comma-separated list stuck to the end of it. The options are
+// already rendered as buttons directly underneath.
+//
+// Cutting at the first question mark handles it exactly, and handles every other way the model
+// might trail something after the question. A question that never asks anything keeps whatever
+// it said, minus a trailing dangling list.
+export function cleanQuestion(s) {
+  let q = String(s || "").trim();
+  const mark = q.indexOf("?");
+  if (mark >= 0) return q.slice(0, mark + 1).trim();
+  // No question mark: drop a trailing "- a,b,c" or "— a,b,c" option list if one is stuck on.
+  return q.replace(/\s*[-–—:]\s*[^-–—:]*,[^-–—:]*$/, "").trim();
+}
+
 export function dealerQuestions(first) {
   const raw = Array.isArray(first && first.dealer_questions) ? first.dealer_questions : [];
   const asked = raw
     .filter(x => x && typeof x === "object" && String(x.q || "").trim())
     .slice(0, 3)
     .map(x => ({
-      q: String(x.q).trim().slice(0, 140),
+      q: cleanQuestion(x.q).slice(0, 140),
       // Four is as many chips as fit on a phone without wrapping into a wall of buttons.
       options: strs(x.options).map(s => String(s).trim().slice(0, 24)).filter(Boolean).slice(0, 4),
     }));
   if (asked.length) return asked;
-  return clean(strs(first && first.questions_for_dealer)).slice(0, 3).map(q => ({ q, options: [] }));
+  return clean(strs(first && first.questions_for_dealer)).slice(0, 3)
+    .map(q => ({ q: cleanQuestion(q), options: [] })).filter(x => x.q);
 }
 
 // The backstop for what splitByPrice misses, below. A bridging listing can hide a gap but it
@@ -1398,7 +1423,7 @@ export async function appraise(env, req) {
   // them, and should be told what would fix it.
   const conf = clamp(first.confidence ?? 0.5);
   if (conf < 0.55) {
-    const ask = clean(strs(first.questions_for_dealer))[0];
+    const ask = cleanQuestion(clean(strs(first.questions_for_dealer))[0]);
     warnings.push(`the identification is uncertain (confidence ${Math.round(conf * 100)}%), and everything ` +
       `below is priced as if it were right. ${ask ? ask.replace(/\?$/, "") + " — that would settle it." :
       "A sharper photo of the marks, or a line about what it is, would settle it."}`);
@@ -1697,7 +1722,7 @@ export async function appraise(env, req) {
         ? "your description and the photographs disagree about what this is"
         : `the photographs do not settle what this is (${Math.round(clamp(first.confidence ?? 0.5) * 100)}% confident)`,
       candidates: idConflict ? [idConflict.model, idConflict.dealer] : null,
-      question: clean(strs(first.questions_for_dealer))[0] ||
+      question: cleanQuestion(clean(strs(first.questions_for_dealer))[0]) ||
         "What is it, in a few words — and is there any writing or stamp on it?",
       // Everything the model said would change the appraisal, not just the first, and with
       // tappable answers where it offered them. A dealer at a sale answers three chips in the
