@@ -670,27 +670,34 @@ export default {
           // line from the dealer settles what no amount of pixel-reading can. Checked here and
           // not only in the page, because the client is not the only way in.
           const b = await readJson(request).catch(() => ({}));
-          if (!String(b.description ?? item.description ?? "").trim() &&
+          // `dealer_description` — never `description`. The item page's description box is the
+          // LISTING copy the model wrote, and it used to be posted here under the name this
+          // endpoint reads as the dealer's own account, replacing "4 rolls of world war 2 silver
+          // nickels" with a paragraph about a single modern nickel and pricing a $576 lot at
+          // $1.42. Two endpoints meant opposite things by one word. Now they use two words, and
+          // `description` is honoured here by nothing at all: an older cached client that still
+          // sends it gets its re-run, and the dealer keeps what they wrote.
+          if (b.description !== undefined) {
+            console.log("appraise: ignoring legacy `description` field for item", iid);
+            delete b.description;
+          }
+          if (!String(b.dealer_description ?? item.description ?? "").trim() &&
               !String(b.markings ?? item.markings ?? "").trim())
             return J({ error: "Tell us what it is, even roughly — a photo on its own is identified wrong too often.",
                        needs_description: true }, 400);
           if (!env.APPRAISER_URL && !env.NEBIUS_API_KEY) return J({ error: "appraiser not configured" }, 503);
-          // Never let the model's own listing copy come back in as the dealer's description.
-          // The item page's description box holds ai_description, and posting it here once
-          // replaced "These are 4 rolls of world war 2 silver nickels" with a paragraph about a
-          // 2023 Jefferson nickel — after which every gate that checks the identification
-          // against the dealer's words was comparing the identification to itself, and a lot
-          // holding $584 of silver priced at $1.42. The client is fixed; this is the backstop,
-          // because losing what the dealer wrote cannot be undone.
-          if (b.description !== undefined && item.ai_description &&
-              String(b.description).trim() === String(item.ai_description).trim()) {
-            console.log("appraise: ignored echoed ai_description for item", iid);
-            delete b.description;
+          // Belt and braces on top of the rename: even under the new name, the model's own
+          // listing copy is never accepted as what the dealer said. Losing a dealer's own words
+          // cannot be undone, so this stays even though it should now be unreachable.
+          if (b.dealer_description !== undefined && item.ai_description &&
+              String(b.dealer_description).trim() === String(item.ai_description).trim()) {
+            console.log("appraise: refused ai_description as dealer_description for item", iid);
+            delete b.dealer_description;
           }
-          if (b.description !== undefined || b.markings !== undefined) {
+          if (b.dealer_description !== undefined || b.markings !== undefined) {
             await db.prepare("UPDATE items SET description=COALESCE(?,description), markings=COALESCE(?,markings) WHERE id=?")
-              .bind(b.description ?? null, b.markings ?? null, iid).run();
-            item.description = b.description ?? item.description; item.markings = b.markings ?? item.markings;
+              .bind(b.dealer_description ?? null, b.markings ?? null, iid).run();
+            item.description = b.dealer_description ?? item.description; item.markings = b.markings ?? item.markings;
           }
           // metered: unlimited plan -> pro plan (300/mo) -> credits -> 402 with the paywall hint
           const fundedBy = await consumeEstimate(db, userId);
@@ -709,8 +716,13 @@ export default {
           const price_cents = b.price === undefined ? item.price_cents : Math.round(Number(b.price) * 100);
           if (!Number.isFinite(price_cents) || price_cents < 0) return J({ error: "bad price" }, 400);
           if (status === "live" && price_cents <= 0) return J({ error: "set a price before listing" }, 400);
+          // listing_description is the shop-page copy. `description` is accepted only as a
+          // fallback for an older cached client, and writes ai_description here exactly as it
+          // always did — this endpoint never touched the dealer's own words, so honouring the
+          // legacy name costs nothing.
+          const listingDesc = b.listing_description ?? b.description;
           await db.prepare("UPDATE items SET ai_title=COALESCE(?,ai_title), ai_description=COALESCE(?,ai_description), price_cents=?, listing_status=?, listed_at=COALESCE(listed_at,?) WHERE id=?")
-            .bind((b.title || "").trim() || null, (b.description || "").trim() || null, price_cents, status, now(), iid).run();
+            .bind((b.title || "").trim() || null, (listingDesc || "").trim() || null, price_cents, status, now(), iid).run();
           return J({ listing_status: status, url: `${env.PUBLIC_ORIGIN || url.origin}/shop/${u.shop_slug}/item/${iid}` });
         }
       }

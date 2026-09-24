@@ -672,7 +672,11 @@ async function renderItemDetail(id) {
       ${!pending && photos.length ? `<div style="height:6px"></div><button class="btn sec sm" id="reappraise">↻ Re-run appraisal</button>` : ""}
     </div>`;
   $("#toItems").onclick = async () => { clearTimeout(pollT); await loadDetail(); renderItems(); };
-  const payload = (extra = {}) => ({ title: $("#lTitle").value, description: $("#lDesc").value, price: $("#lPrice").value, ...extra });
+  // listing_description, not description. This box holds the shop-page copy; the dealer's own
+  // account of the item is items.description and is edited nowhere on this form. They were both
+  // called "description" and posted to two endpoints that meant opposite things by it, which is
+  // how the model's prose came to overwrite a dealer's own words. Distinct names, no collision.
+  const payload = (extra = {}) => ({ title: $("#lTitle").value, listing_description: $("#lDesc").value, price: $("#lPrice").value, ...extra });
   const publishAs = async (listing_status) => {
     try { const res = await api("/items/" + id + "/publish", { method: "POST", body: JSON.stringify(payload({ listing_status })) });
       toast(listing_status === "live" ? "Listed online" : "Saved"); renderItemDetail(id); return res; }
@@ -709,7 +713,7 @@ async function renderItemDetail(id) {
     const a = $("#clarify").value.trim();
     if (!a) { $("#clarify").focus(); return toast("A few words is enough — what is it?"); }
     $("#clarifyGo").disabled = true; $("#clarifyGo").textContent = "Pricing…";
-    await rerun({ description: [String(item.description || "").trim(), a].filter(Boolean).join(". ") });
+    await rerun({ dealer_description: [String(item.description || "").trim(), a].filter(Boolean).join(". ") });
   };
   if ($("#retry")) $("#retry").onclick = rerun;
   if (pending) pollT = setTimeout(() => renderItemDetail(id), 4000);
