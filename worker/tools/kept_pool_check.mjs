@@ -13,6 +13,21 @@
 // So this drives the real repricer - same REPRICE_SYSTEM, same model, same live listings as a
 // production appraisal - over the same ten queries, and reports the spread of what it keeps.
 // No photographs needed, because the repricer never sees one.
+//
+// MEASURED, 2026-09-24, ten categories x four runs each, every pool fetched once and reused:
+//
+//   tooWide fired on          0/40 runs   (5/10 RAW pools are over 6x)
+//   identical kept sets       13/40 runs  - only Red Wing picked the same four every time
+//   median price swing        1.00x to 1.26x, worst case the Featherweight at $425 vs $535
+//
+// That second and third line together are the finding, and they point the opposite way to what
+// "the repricer is unstable" suggested. The model swaps which four equivalent listings it keeps
+// on nearly every run, and lands on almost the same market anyway. A 1.1x-1.26x band is smaller
+// than the asking-versus-sold gap this tool is already honest about.
+//
+// So paying N times over for self-consistency HERE buys close to nothing. The 3.3x swings - the
+// same photograph priced at $260 and at $850 - live in the IDENTIFICATION, not in the comparable
+// choice. That is where the money goes if it goes anywhere.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -59,7 +74,10 @@ const ratio = ps => Math.round((Math.max(...ps) / Math.min(...ps)) * 100) / 100;
 // titles shown:   node worker/tools/kept_pool_check.mjs zenith
 // Optional repeat count, to measure how stable the repricer's choice is across runs against one
 // unchanging live pool:   node worker/tools/kept_pool_check.mjs zenith 5
-const only = (process.argv[2] || "").toLowerCase();
+// "all" means every category, and is how you ask for a repeat count without a filter:
+//   node worker/tools/kept_pool_check.mjs all 4
+const arg2 = (process.argv[2] || "").toLowerCase();
+const only = (arg2 === "all" || arg2 === "-") ? "" : arg2;
 const times = Math.max(1, parseInt(process.argv[3], 10) || 1);
 
 const env = loadEnv();
@@ -73,6 +91,9 @@ if (/^SBX-/i.test(env.EBAY_CLIENT_ID)) {
 
 const c = cfg(env);
 let rawWide = 0, keptWide = 0, measured = 0, categories = 0;
+const byCategory = new Map();
+const median = ps => { const s = [...ps].sort((a, b) => a - b);
+  return s.length % 2 ? s[(s.length - 1) / 2] : Math.round(((s[s.length / 2 - 1] + s[s.length / 2]) / 2) * 100) / 100; };
 
 for (const q of ITEMS) {
   if (only && !q.toLowerCase().includes(only)) continue;
@@ -112,6 +133,9 @@ for (const q of ITEMS) {
     const ps = kept.map(x => x.price);
     const warns = tooWide(Math.min(...ps), Math.max(...ps));
     if (warns) keptWide++;
+    // The kept set's identity, for counting how often the model picks the same four.
+    if (!byCategory.has(q)) byCategory.set(q, []);
+    byCategory.get(q).push({ key: [...ps].sort((a, b) => a - b).join(","), median: median(ps) });
     console.log(`${tag}kept ${ps.length} listings  $${Math.min(...ps)}-$${Math.max(...ps)}  ${ratio(ps)}x` +
       `${warns ? "   <<< tooWide WARNS" : ""}${splitByPrice(kept) ? "   [splitByPrice fires]" : ""}`);
     // With a filter argument, print what was KEPT as well. A spread number cannot tell you
@@ -119,6 +143,24 @@ for (const q of ITEMS) {
     if (only) for (const x of kept) console.log(`      kept:    $${x.price}  ${String(x.title).slice(0, 76)}`);
     if (only && times === 1) for (const x of rejected) console.log(`      dropped: ${String(x.why).slice(0, 84)}`);
     else if (!only) for (const x of rejected.slice(0, 3)) console.log(`      dropped: ${String(x.why).slice(0, 84)}`);
+  }
+  console.log();
+}
+
+// How much the repricer's choice moves when nothing else does. Each category's live pool is
+// fetched once, so every difference between runs of the same category is the model changing its
+// mind on identical input. The median is what a dealer would be quoted; the spread between the
+// lowest and highest median across runs is the size of the coin-flip they are subject to.
+if (times > 1) {
+  console.log(`--- run-to-run variance on an unchanging pool ---`);
+  console.log(`category                        distinct kept sets   median low-high   swing`);
+  for (const [q, rows] of byCategory) {
+    if (!rows.length) continue;
+    const sets = new Set(rows.map(r => r.key));
+    const meds = rows.map(r => r.median).sort((a, b) => a - b);
+    const lo = meds[0], hi = meds[meds.length - 1];
+    console.log(`${q.slice(0, 30).padEnd(30)}  ${String(sets.size + "/" + rows.length).padEnd(18)}   ` +
+      `$${lo}-$${hi}`.padEnd(16) + `  ${lo > 0 ? Math.round((hi / lo) * 100) / 100 + "x" : "-"}`);
   }
   console.log();
 }

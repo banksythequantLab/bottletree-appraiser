@@ -60,7 +60,8 @@ eq("a hair over 6x is", tooWide(100, 600.01), true);
 // below are raw because that is the scary case; tooWide runs on the KEPT pool.
 //
 // MEASURED, same day, with tools/kept_pool_check.mjs driving the real repricer over the same ten
-// live queries: raw pools over 6x, 5/10. Kept pools that warn, 0/10. The repricer collapses
+// live queries: raw pools over 6x, 5/10. Kept pools that warn, 0/10 — and 0/40 on a later run of
+// four repeats per category, so the zero is not luck. The repricer collapses
 // every wide pool on its own and names why - "Pumpkin orange colorway, a rare variant not
 // comparable to standard turquoise/white Butterprint" takes Pyrex from 20.42x raw to 2.25x kept;
 // "Bee Sting #5 butter churn crock, a different functional form" takes Red Wing 6.2x to 3.27x;
