@@ -675,6 +675,18 @@ export default {
             return J({ error: "Tell us what it is, even roughly — a photo on its own is identified wrong too often.",
                        needs_description: true }, 400);
           if (!env.APPRAISER_URL && !env.NEBIUS_API_KEY) return J({ error: "appraiser not configured" }, 503);
+          // Never let the model's own listing copy come back in as the dealer's description.
+          // The item page's description box holds ai_description, and posting it here once
+          // replaced "These are 4 rolls of world war 2 silver nickels" with a paragraph about a
+          // 2023 Jefferson nickel — after which every gate that checks the identification
+          // against the dealer's words was comparing the identification to itself, and a lot
+          // holding $584 of silver priced at $1.42. The client is fixed; this is the backstop,
+          // because losing what the dealer wrote cannot be undone.
+          if (b.description !== undefined && item.ai_description &&
+              String(b.description).trim() === String(item.ai_description).trim()) {
+            console.log("appraise: ignored echoed ai_description for item", iid);
+            delete b.description;
+          }
           if (b.description !== undefined || b.markings !== undefined) {
             await db.prepare("UPDATE items SET description=COALESCE(?,description), markings=COALESCE(?,markings) WHERE id=?")
               .bind(b.description ?? null, b.markings ?? null, iid).run();

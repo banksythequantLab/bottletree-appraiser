@@ -682,8 +682,17 @@ async function renderItemDetail(id) {
   if ($("#saveDraft")) $("#saveDraft").onclick = () => publishAs(item.listing_status === "live" ? "live" : "hidden");
   if ($("#unlist")) $("#unlist").onclick = () => publishAs("hidden");
   if ($("#viewLive")) { const me = await api("/auth/me"); $("#viewLive").href = "/shop/" + me.shop_slug + "/item/" + id; }
-  const rerun = async () => {
-    try { await api("/items/" + id + "/appraise", { method: "POST", body: JSON.stringify(payload()) }); }
+  // Re-running must NOT post the form's description. That box holds the LISTING copy — the
+  // shop-page prose the model wrote — and the appraise endpoint reads `description` as the
+  // dealer's own account of the item. Posting one as the other overwrote "These are 4 rolls of
+  // world war 2 silver nickels" with "A 2023 Jefferson nickel struck by the United States
+  // Mint...", and every later run was then anchored to the model's own previous guess. A lot
+  // holding $584 of silver came back at $1.42. It is also self-confirming: the gates that are
+  // supposed to catch a bad identification all compare against the dealer's words, and those
+  // words had been replaced by the identification. Re-run sends nothing and keeps what the
+  // dealer wrote.
+  const rerun = async (extra) => {
+    try { await api("/items/" + id + "/appraise", { method: "POST", body: JSON.stringify(extra || {}) }); }
     catch (e) {
       // The appraiser will not run on photographs alone. Put the cursor where the answer goes
       // rather than just refusing.
@@ -692,16 +701,15 @@ async function renderItemDetail(id) {
     }
     renderItemDetail(id);
   };
-  if ($("#reappraise")) $("#reappraise").onclick = rerun;
-  // The clarification answer is appended to the description rather than replacing it, so the
-  // dealer's earlier words are not lost by answering a question about them.
+  if ($("#reappraise")) $("#reappraise").onclick = () => rerun();
+  // The answer is appended to the DEALER's stored description — item.description — not to the
+  // listing box on this form, which holds the model's prose. Appending to that box would feed
+  // the model's own words back as the dealer's.
   if ($("#clarifyGo")) $("#clarifyGo").onclick = async () => {
     const a = $("#clarify").value.trim();
     if (!a) { $("#clarify").focus(); return toast("A few words is enough — what is it?"); }
-    const merged = [$("#lDesc").value.trim(), a].filter(Boolean).join(". ");
-    $("#lDesc").value = merged;
     $("#clarifyGo").disabled = true; $("#clarifyGo").textContent = "Pricing…";
-    await rerun();
+    await rerun({ description: [String(item.description || "").trim(), a].filter(Boolean).join(". ") });
   };
   if ($("#retry")) $("#retry").onclick = rerun;
   if (pending) pollT = setTimeout(() => renderItemDetail(id), 4000);

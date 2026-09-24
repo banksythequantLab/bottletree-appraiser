@@ -21,7 +21,14 @@
 }}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased;padding-bottom:var(--bottom-pad,calc(76px + env(safe-area-inset-bottom)))}
+body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased}
+/* The clearance for the fixed bottom bars belongs on the CONTENT, not on body. body is
+   height:100%, and bottom padding on a fixed-height box that its content overflows does not
+   extend the scrollable area — the page scrolled to its end and the last 57px of the "Re-run
+   appraisal" button was still underneath the tab bar. #app grows with its content, so padding
+   there becomes real scrollable space. --bottom-pad is measured from the bars themselves in
+   syncBottomPad(). */
+main#app{padding-bottom:var(--bottom-pad,calc(76px + env(safe-area-inset-bottom)))}
 h1,h2,h3{font-family:"Fraunces",Georgia,serif;font-weight:600;margin:0}
 button{font-family:inherit;cursor:pointer}
 .wrap{max-width:620px;margin:0 auto;padding:0 14px}
@@ -110,6 +117,6 @@ ul.ev{margin:4px 0 0;padding-left:18px;font-size:.88rem}ul.ev li{margin:3px 0}
 <div class="toast" id="toast"></div>
 <script src="/rc-sdk.js?v=0.4"></script>
 <script src="/billing.js?v=0.5"></script>
-<script src="/app.js?v=0.5"></script>
+<script src="/app.js?v=0.6"></script>
 </body>
 </html>
