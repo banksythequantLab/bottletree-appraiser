@@ -1402,6 +1402,17 @@ async function meltEstimate(c, ident, req, findings) {
   return { metal, fine_troy_oz: oz, basis: String(r.basis || ""), confidence: clamp(r.confidence ?? 0.5) };
 }
 
+// Do the stored photos look like HEIC? The R2 key keeps the extension the upload arrived with,
+// so the URL is the only signal available this far down the pipeline - the file itself is long
+// gone and the vision model's error text is a generic decode failure.
+//
+// Deliberately matches on the extension and not on "heic" anywhere in the string: an item photo
+// legitimately living under a key containing that word - a dealer's folder name, an item called
+// "heichelheim" - must not be accused of being the wrong format.
+export function photosLookHeic(photos) {
+  return (photos || []).some(p => /\.hei[cf](\?|#|$)/i.test(String(p && p.url || "")));
+}
+
 // ---------- the pipeline ----------
 export async function appraise(env, req) {
   const c = cfg(env);
@@ -1410,7 +1421,23 @@ export async function appraise(env, req) {
   const warnings = [];
 
   const findings = await mapLimit(req.photos, 3, p => photoFindings(c, p.kind, p.url));
-  if (findings.every(f => f.error)) warnings.push("vision model failed on every photo; appraisal relies on dealer text only");
+  // The last layer. Three client-side defences now stand between an iPhone's HEIC and this line -
+  // the accept lists, the conversion in shrink(), the refusal in acceptPhoto() - and if all three
+  // are bypassed (an older cached app.js, a direct API call, a browser that decodes HEIC for the
+  // canvas but writes it back out unchanged) this is where it lands.
+  //
+  // The generic sentence was already here and it fired correctly on the measured HEIC run. It was
+  // still no use: it names a symptom the dealer cannot act on, while the card above it shows an
+  // identification invented from their own sentence. When every photo failed and the photos are
+  // HEIC, the cause is known, so say it and say what fixes it.
+  if (findings.every(f => f.error)) {
+    const heic = photosLookHeic(req.photos);
+    warnings.push(heic
+      ? `the photos are in Apple's HEIC format and the appraiser cannot read them, so NOTHING ` +
+        `below comes from the pictures - it is all inferred from your description. On iPhone: ` +
+        `Settings > Camera > Formats > Most Compatible, then photograph the item again.`
+      : "vision model failed on every photo; appraisal relies on dealer text only");
+  }
 
   // Give the reasoner today's metal prices up front so its own number starts from reality.
   const spot = await metalPrices();
