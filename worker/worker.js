@@ -704,6 +704,16 @@ export default {
             console.log("appraise: ignoring legacy `description` field for item", iid);
             delete b.description;
           }
+          // Photographs alone are not enough, and this is the last place that can insist.
+          // Four rolls of nickels stood on end were identified five different ways across five
+          // runs from the same photographs - shotgun shells once, a 2023 Silver Eagle set
+          // another time, which priced a lot holding $585 of silver at $260. One line from the
+          // dealer settles what no amount of pixel-reading can. Checked on the server and not
+          // only in the page, because the page is not the only way in.
+          if (!String(b.dealer_description ?? item.description ?? "").trim() &&
+              !String(b.markings ?? item.markings ?? "").trim())
+            return J({ error: "Tell us what it is, even roughly — a photo on its own is identified wrong too often.",
+                       needs_description: true }, 400);
           // Belt and braces on top of the rename: the model's own listing copy is never taken
           // as what the dealer said, because a dealer's own words cannot be recovered once gone.
           if (b.dealer_description !== undefined && item.ai_description &&
