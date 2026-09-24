@@ -55,6 +55,13 @@ const ITEMS = [
 
 const ratio = ps => Math.round((Math.max(...ps) / Math.min(...ps)) * 100) / 100;
 
+// Optional substring filter, so one suspicious category can be re-run on its own with its kept
+// titles shown:   node worker/tools/kept_pool_check.mjs zenith
+// Optional repeat count, to measure how stable the repricer's choice is across runs against one
+// unchanging live pool:   node worker/tools/kept_pool_check.mjs zenith 5
+const only = (process.argv[2] || "").toLowerCase();
+const times = Math.max(1, parseInt(process.argv[3], 10) || 1);
+
 const env = loadEnv();
 for (const [k, hint] of [["EBAY_CLIENT_ID", "production eBay pair"], ["EBAY_CLIENT_SECRET", "production eBay pair"], ["NEBIUS_API_KEY", "Nebius key"]]) {
   if (!env[k]) { console.error(`Missing ${k} - put the ${hint} in worker/.dev.vars (gitignored).`); process.exit(2); }
@@ -65,9 +72,10 @@ if (/^SBX-/i.test(env.EBAY_CLIENT_ID)) {
 }
 
 const c = cfg(env);
-let rawWide = 0, keptWide = 0, measured = 0;
+let rawWide = 0, keptWide = 0, measured = 0, categories = 0;
 
 for (const q of ITEMS) {
+  if (only && !q.toLowerCase().includes(only)) continue;
   const live = await ebayActive(env, q);
   if (!live || !live.length) { console.log(`${q}\n  no live pool (${ebayFailure() || "empty"})\n`); continue; }
   const rawPs = live.map(x => x.price);
@@ -78,39 +86,45 @@ for (const q of ITEMS) {
   const user = `Item: ${q}\nYour earlier estimate: unknown; price it from the comparables.\n` +
     `\nComparables:\n${JSON.stringify(live.map(l => ({ title: l.title, price: l.price, url: l.url, source: "ebay" })), null, 1)}`;
 
-  let kept = [], rejected = [];
-  try {
-    const second = await textJson(c, REPRICE_SYSTEM, user, 1000);
-    const comps = (second.comparables || []).slice(0, 4).filter(x => x && x.title);
-    rejected = (second.rejected || []).filter(r => r && r.title);
-    kept = keptLive(live, comps);
-  } catch (e) {
-    console.log(`${q}\n  repricer failed: ${e.message}\n`);
-    continue;
-  }
-
-  measured++;
-  if (tooWide(Math.min(...rawPs), Math.max(...rawPs))) rawWide++;
-
-  if (!kept.length) {
-    console.log(`${q}\n  raw ${live.length} @ ${rawR}x  ->  kept 0 (all ${rejected.length} rejected)`);
-    console.log(`  no kept pool, so tooWide cannot fire - the "different items" warning covers this\n`);
-    continue;
-  }
-  const ps = kept.map(x => x.price);
-  const r = ratio(ps);
-  const warns = tooWide(Math.min(...ps), Math.max(...ps));
-  if (warns) keptWide++;
   console.log(q);
   console.log(`  raw  ${live.length} listings  $${Math.min(...rawPs)}-$${Math.max(...rawPs)}  ${rawR}x`);
-  console.log(`  kept ${ps.length} listings  $${Math.min(...ps)}-$${Math.max(...ps)}  ${r}x` +
-    `${warns ? "   <<< tooWide WARNS" : ""}${splitByPrice(kept) ? "   [splitByPrice also fires]" : ""}`);
-  for (const x of rejected.slice(0, 3)) console.log(`    dropped: ${String(x.why).slice(0, 88)}`);
+  categories++;
+  if (tooWide(Math.min(...rawPs), Math.max(...rawPs))) rawWide++;
+
+  // The live pool is fetched once and reused for every repeat, so any difference below is the
+  // repricer changing its mind, not the market moving.
+  for (let i = 0; i < times; i++) {
+    let kept = [], rejected = [];
+    try {
+      const second = await textJson(c, REPRICE_SYSTEM, user, 1000);
+      const comps = (second.comparables || []).slice(0, 4).filter(x => x && x.title);
+      rejected = (second.rejected || []).filter(r => r && r.title);
+      kept = keptLive(live, comps);
+    } catch (e) { console.log(`  run ${i + 1}: repricer failed: ${e.message}`); continue; }
+
+    measured++;
+    const tag = times > 1 ? `  run ${i + 1}: ` : "  ";
+    if (!kept.length) {
+      console.log(`${tag}kept 0 of ${live.length} (all ${rejected.length} rejected) - no pool, so ` +
+        `tooWide cannot fire; the "different items" warning covers this`);
+      continue;
+    }
+    const ps = kept.map(x => x.price);
+    const warns = tooWide(Math.min(...ps), Math.max(...ps));
+    if (warns) keptWide++;
+    console.log(`${tag}kept ${ps.length} listings  $${Math.min(...ps)}-$${Math.max(...ps)}  ${ratio(ps)}x` +
+      `${warns ? "   <<< tooWide WARNS" : ""}${splitByPrice(kept) ? "   [splitByPrice fires]" : ""}`);
+    // With a filter argument, print what was KEPT as well. A spread number cannot tell you
+    // whether a warning is right; only the titles can.
+    if (only) for (const x of kept) console.log(`      kept:    $${x.price}  ${String(x.title).slice(0, 76)}`);
+    if (only && times === 1) for (const x of rejected) console.log(`      dropped: ${String(x.why).slice(0, 84)}`);
+    else if (!only) for (const x of rejected.slice(0, 3)) console.log(`      dropped: ${String(x.why).slice(0, 84)}`);
+  }
   console.log();
 }
 
-console.log(`--- over ${measured} measured categories, threshold ${MAX_COHERENT_SPREAD}x ---`);
-console.log(`raw pools wider than ${MAX_COHERENT_SPREAD}x:  ${rawWide}/${measured}`);
-console.log(`kept pools that WARN:       ${keptWide}/${measured}`);
+console.log(`--- ${categories} categories, ${measured} repricer runs, threshold ${MAX_COHERENT_SPREAD}x ---`);
+console.log(`raw pools wider than ${MAX_COHERENT_SPREAD}x:  ${rawWide}/${categories} categories`);
+console.log(`kept pools that WARN:       ${keptWide}/${measured} runs`);
 console.log(`If the kept number is most of them, the warning is noise and the threshold should`);
 console.log(`rise or the check should go. If it is a few, it is doing what it was written to do.`);

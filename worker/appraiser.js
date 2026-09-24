@@ -427,9 +427,15 @@ export function sizesIn(text) {
 const PART = "lids?|knobs?|dials?|handles?|covers?|stoppers?|inserts?|liners?|cords?|grilles?|bezels?|faceplates?|decals?|badges?|emblems?|hinges?|latches|spouts?|shades?|drawers?|legs?|feet";
 // "Part Or Repair" is the same phrase as "parts/repair" with different punctuation. A live
 // Featherweight sweep kept a $149.90 "Part Or Repair" listing in a pool of working machines
-// whose median was $400, dragging the quoted floor down by 2.7x. Separator is /, &, or, or and,
-// in either word order.
-const PART_REPAIR = `\\b(?:parts?\\s*(?:[/&]|\\bor\\b|\\band\\b)\\s*repair|repair\\s*(?:[/&]|\\bor\\b|\\band\\b)\\s*parts?)\\b`;
+// whose median was $400, dragging the quoted floor down by 2.7x. So: /, &, "or", "and", or
+// nothing at all, in either word order.
+//
+// The separator is optional. Six repricer runs against one frozen Zenith pool kept three
+// different sets of four, and one of them kept "Zenith H724Z Tube Radio AM FM Bakelite Brown
+// Portable Parts Repair Handle" as a comparable for a working radio. Bare "Parts Repair", with
+// no slash and no "or", is the same condition statement as "parts/repair".
+const SEP = `(?:\\s*[/&]\\s*|\\s+(?:or|and)\\s+|\\s+)`;
+const PART_REPAIR = `\\b(?:parts?${SEP}repair|repair${SEP}parts?)\\b`;
 const PART_ONLY = new RegExp(`\\b(?:${PART}|parts?)\\s+only\\b|\\bfor\\s+parts\\b|${PART_REPAIR}`, "i");
 const PART_LEAD = new RegExp(`^\\s*(?:${PART})\\b`, "i");
 const PART_ANY = new RegExp(`\\b(?:${PART})\\b`, "i");

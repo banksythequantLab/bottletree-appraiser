@@ -123,6 +123,18 @@ eq("for parts still", c(FW, "Singer 221 Featherweight Sewing Machine For Parts")
 // The dealer asking about a broken one keeps them.
 eq("dealer asked for parts", c(FW + " for parts or repair",
   "Vintage SINGER 221 Featherweight Sewing Machine Part Or Repair"), false);
+// No separator at all. Found by repeating the repricer six times against one frozen Zenith
+// pool: three different sets of four came back, and one of them kept this as a comparable for
+// a working radio. The deterministic filter should never have handed it over.
+const ZEN = "Zenith Bakelite tube radio";
+eq("bare Parts Repair", c(ZEN, "Zenith H724Z Tube Radio AM FM Bakelite Brown Portable Parts Repair Handle"), true);
+eq("bare Part Repair singular", c(ZEN, "Zenith Bakelite Tube Radio Part Repair"), true);
+eq("repair parts, reversed and bare", c(ZEN, "Zenith Bakelite Tube Radio Repair Parts Lot"), true);
+// Working radios in the same live pool must survive all of it.
+eq("tested working survives", c(ZEN, "Vintage Zenith H724Z1 Bakelite Am Fm Table Radio Tested Working Green"), false);
+eq("needs love survives", c(ZEN, "Vintage 1950s(?) Zenith Bakelite Tube Radio H725 Brown Tested Working Needs Love"), false);
+eq("works original survives", c(ZEN, "Vintage Zenith 5D810Y Black Bakelite Tube Radio AM Works Original USA"), false);
+
 // Words that merely sit near each other are not the phrase.
 eq("repaired is not repair-or-parts", c(FW, "Singer 221 Featherweight Professionally Repaired and Serviced"), false);
 eq("part of a collection", c(FW, "Singer Featherweight 221 Part of a Large Estate Collection"), false);
