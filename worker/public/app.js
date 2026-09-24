@@ -288,7 +288,7 @@ function renderItems() {
       <div style="height:8px"></div>
       <div class="row" style="gap:8px;align-items:center">
         <button class="btn sec sm" id="iCam" style="display:none">📷 Photo</button>
-        <label class="btn sec sm" style="display:inline-block;margin:0">Choose photos<input type="file" accept="image/*" multiple hidden id="iFiles"></label>
+        <label class="btn sec sm" style="display:inline-block;margin:0">Choose photos<input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden id="iFiles"></label>
         <span class="muted" id="iCount" style="font-size:.82rem"></span>
       </div>
       <div id="iThumbs" class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px"></div>
@@ -427,12 +427,12 @@ function renderCapture() {
   app.innerHTML = `<h1 class="h1">Add item with AI</h1>
     <div class="muted" style="font-size:.85rem;margin-bottom:6px">Take the shots you can. The marks photo matters most.</div>
     <div class="card"><div class="shots" id="shots">${SHOTS.map(s => `
-      <div class="shot" data-kind="${s.kind}"><input type="file" accept="image/*" capture="environment" hidden>
+      <div class="shot" data-kind="${s.kind}"><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden>
         <div class="ph" id="ph-${s.kind}">📷</div><div class="sl">${s.label}</div><div class="sh">${s.hint}</div>
         <a href="#" class="pick" style="font-size:.64rem;color:var(--sub);text-decoration:underline">choose file</a></div>`).join("")}</div>
       <div style="height:8px"></div>
       <button class="btn sec sm" id="moreCam" style="display:none">📷 Another photo</button>
-      <label class="btn sec sm" style="display:inline-block">+ More photos <input type="file" accept="image/*" multiple hidden id="moreShots"></label>
+      <label class="btn sec sm" style="display:inline-block">+ More photos <input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden id="moreShots"></label>
       <span class="muted" id="moreCount" style="font-size:.82rem;margin-left:8px"></span>
     </div>
     <div class="card">
@@ -493,12 +493,28 @@ function renderCapture() {
   };
 }
 // downscale to <=1600px JPEG so uploads are quick on cell data
+// Ported from main, 2026-09-24, where it was measured end to end. An iPhone writes HEIC by
+// default. The early return that used to sit on the first line of shrink() refused to even
+// attempt one - and iOS Safari, the one browser a HEIC ever arrives from, decodes HEIC natively.
+// So the file went up untouched and the vision model was handed a .heic URL it cannot read: the
+// appraisal came back "vision model failed on every photo", with every line of its evidence
+// beginning "Dealer reports". This file posts to /items/:id/appraise too, so that is this
+// product's failure as much as Bottle Tree's.
+//
+// isHeic() asks about the OUTPUT, never the input: did this actually come out as a JPEG? The
+// answer differs by browser, and guessing it from the file name is how this got missed.
+function isHeic(file) {
+  return /heic|heif/i.test(file && file.type || "") || /\.hei[cf]$/i.test(file && file.name || "");
+}
+
 async function shrink(file, max = 1600) {
-  if (!file.type.startsWith("image/") || file.type === "image/heic") return file;
+  if (!file.type.startsWith("image/") && !isHeic(file)) return file;
   try {
     const bmp = await createImageBitmap(file);
     const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
-    if (s === 1 && file.size < 2.5e6) return file;
+    // A small JPEG needs nothing doing to it. A small HEIC still has to be re-encoded, because
+    // the point is the format and not the size.
+    if (s === 1 && file.size < 2.5e6 && !isHeic(file)) return file;
     const c = document.createElement("canvas"); c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
     c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
     const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.86));
