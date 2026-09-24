@@ -695,15 +695,26 @@ export default {
           // modern nickel, after which the lot priced at $1.42 against $576 of silver. The
           // client is fixed too; this is the backstop, because what a dealer wrote cannot be
           // recovered once it is gone.
-          if (b.description !== undefined && item.ai_description &&
-              String(b.description).trim() === String(item.ai_description).trim()) {
-            console.log("appraise: ignored echoed ai_description for item", iid);
+          // `dealer_description` — never `description`. One word meant "the shop-page copy the
+          // model wrote" to /publish and "what the dealer said" here, and the item page posted
+          // the same box to both. Two names now, and `description` is honoured here by nothing
+          // at all: an older cached client still sending it gets its re-run, and the dealer
+          // keeps what they wrote.
+          if (b.description !== undefined) {
+            console.log("appraise: ignoring legacy `description` field for item", iid);
             delete b.description;
           }
-          if (b.description !== undefined || b.markings !== undefined) {
+          // Belt and braces on top of the rename: the model's own listing copy is never taken
+          // as what the dealer said, because a dealer's own words cannot be recovered once gone.
+          if (b.dealer_description !== undefined && item.ai_description &&
+              String(b.dealer_description).trim() === String(item.ai_description).trim()) {
+            console.log("appraise: refused ai_description as dealer_description for item", iid);
+            delete b.dealer_description;
+          }
+          if (b.dealer_description !== undefined || b.markings !== undefined) {
             await db.prepare("UPDATE items SET description=COALESCE(?,description), markings=COALESCE(?,markings) WHERE id=?")
-              .bind(b.description ?? null, b.markings ?? null, iid).run();
-            item.description = b.description ?? item.description; item.markings = b.markings ?? item.markings;
+              .bind(b.dealer_description ?? null, b.markings ?? null, iid).run();
+            item.description = b.dealer_description ?? item.description; item.markings = b.markings ?? item.markings;
           }
           // metered: unlimited plan -> pro plan (300/mo) -> credits -> 402 with the paywall hint
           const fundedBy = await consumeEstimate(db, userId);
@@ -731,7 +742,7 @@ export default {
           if (!Number.isFinite(price_cents) || price_cents < 0) return J({ error: "bad price" }, 400);
           if (status === "live" && price_cents <= 0) return J({ error: "set a price before listing" }, 400);
           await db.prepare("UPDATE items SET ai_title=COALESCE(?,ai_title), ai_description=COALESCE(?,ai_description), price_cents=?, listing_status=?, listed_at=COALESCE(listed_at,?) WHERE id=?")
-            .bind((b.title || "").trim() || null, (b.description || "").trim() || null, price_cents, status, now(), iid).run();
+            .bind((b.title || "").trim() || null, ((b.listing_description ?? b.description) || "").trim() || null, price_cents, status, now(), iid).run();
           return J({ listing_status: status, url: `${env.PUBLIC_ORIGIN || url.origin}/shop/${u.shop_slug}/item/${iid}` });
         }
       }
