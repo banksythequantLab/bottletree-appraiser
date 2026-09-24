@@ -66,11 +66,20 @@ eq("explains itself", detectLot("256 gb total", "32gb 2rx4").how, "256GB total d
 // rolls of world war 2 silver nickels" detected no lot, so the model priced the group as one
 // object and the re-pricer discarded eight live single-roll listings at $130-$200 as "single
 // roll, not four rolls" — the best evidence available for the item.
-eq("4 rolls", detectLot("These are 4 rolls of world war 2 silver nickels", ""), { count: 4, how: "the dealer stated the count" });
-eq("2 boxes", detectLot("2 boxes of Fiesta plates", ""), { count: 2, how: "the dealer stated the count" });
-eq("3 bags", detectLot("3 bags of marbles from the attic", ""), { count: 3, how: "the dealer stated the count" });
-eq("12 sleeves", detectLot("12 sleeves of wheat pennies", ""), { count: 12, how: "the dealer stated the count" });
-eq("2 sets of shakers is two sets", detectLot("2 sets of salt and pepper shakers", ""), { count: 2, how: "the dealer stated the count" });
+const LOT = (count, unit) => ({ count, unit, how: "the dealer stated the count" });
+eq("4 rolls", detectLot("These are 4 rolls of world war 2 silver nickels", ""), LOT(4, "roll"));
+eq("2 boxes", detectLot("2 boxes of Fiesta plates", ""), LOT(2, "box"));
+eq("3 bags", detectLot("3 bags of marbles from the attic", ""), LOT(3, "bag"));
+eq("12 sleeves", detectLot("12 sleeves of wheat pennies", ""), LOT(12, "sleeve"));
+eq("2 sets of shakers is two sets", detectLot("2 sets of salt and pepper shakers", ""), LOT(2, "set"));
+eq("2 cases", detectLot("2 cases of soda bottles", ""), LOT(2, "case"));
+// The unit is what the comps have to be priced in. Production, 2026-09-24: without it, "4 rolls
+// of world war 2 silver nickels" searched as a single nickel, returned coins at $5-$10, and the
+// lot arithmetic multiplied a $6 coin by four for a lot holding $573 of silver.
+eq("the counted unit travels with the count", detectLot("4 rolls of war nickels", "").unit, "roll");
+// "lot of 6" names no container to price in, so there is no unit to add to the search.
+eq("no unit when the count came from 'lot of N'", detectLot("lot of 6 plates", ""),
+  { count: 6, unit: null, how: "the dealer stated the count" });
 // A year must never be read as a count. The three-digit cap means "1943 rolls" matches nothing
 // at all rather than picking "194" or "943" out of the middle of the year.
 eq("a year is not a count", detectLot("1943 rolls of war nickels", ""), null);

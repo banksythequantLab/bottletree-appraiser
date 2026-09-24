@@ -641,6 +641,20 @@ export function unitDisagreement(meltValue, count, marketMedian) {
   return Math.round((hi / lo) * 100) / 100;
 }
 
+// Whether to withhold the price and ask. Pulled out of the pipeline so it can be tested: the
+// conditions that reach it — a model that happens to report 50% rather than 60%, a lot whose
+// metal and market agree — cannot be produced on demand against the live API, and a rule this
+// consequential should not rest on an inline condition nobody can exercise.
+export const CONFIDENCE_FLOOR = 0.55;
+export function shouldGate(idConflict, confidence, corroborated) {
+  // A disagreement with the dealer always gates. They are holding the object; if the model's
+  // reading and theirs are different objects, no amount of corroboration settles which is right,
+  // because every other signal here is downstream of the model's reading.
+  if (idConflict) return true;
+  // Otherwise low self-reported confidence gates — unless two independent routes have agreed.
+  return confidence < CONFIDENCE_FLOOR && !corroborated;
+}
+
 // Questions the dealer can answer with a tap. The model is asked for these as {q, options}, but
 // a model that ignores a new field is a routine event, not an emergency — so the plain
 // questions_for_dealer strings are the fallback, and the card simply shows a text box for those.
@@ -1003,7 +1017,11 @@ const COUNT_RE = new RegExp(
   `(?:\\b(?:lot|set|box|pack|roll|group|case|tray|bag)\\s+of\\s+(\\d{1,3})\\b)` +
   `|(?:\\b(?:qty|quantity)\\s*[:#]?\\s*(\\d{1,3})\\b)` +
   `|(?:\\b(\\d{1,3})\\s*(?:x|×|pcs?|pieces?|sticks?|modules?|units?|count|ct)\\b)` +
-  `|(?:\\b(\\d{1,3})\\s*(?:${CONTAINER})\\b)`, "i");
+  `|(?:\\b(\\d{1,3})\\s*(${CONTAINER})\\b)`, "i");
+// "rolls" -> "roll". The unit the dealer counted IN is the unit the comps have to be in.
+// Of the containers above only "boxes" drops -es; "cases" and "crates" drop -s alone. A general
+// -es rule turned "cases" into "cas", which would then be appended to a search query.
+const singularUnit = w => /boxes$/i.test(w) ? w.slice(0, -2) : w.replace(/s$/i, "");
 const WORD_COUNT = { pair: 2, brace: 2, dozen: 12, "half dozen": 6, "half-dozen": 6 };
 const WORD_COUNT_RE = /\b(half[- ]dozen|dozen|pair|brace)\s+of\s+|\b(half[- ]dozen|dozen|pair|brace)\b/i;
 
@@ -1040,7 +1058,12 @@ export function detectLot(description, markings) {
     // container is named, so there is no such ambiguity.
     const fromPieces = m[3] !== undefined;
     if (n >= 2 && n <= 500 && !(fromPieces && MATCHED_SET.test(both)))
-      return { count: n, how: "the dealer stated the count" };
+      // The container the dealer counted in — "4 ROLLS" — travels with the count, because the
+      // comparables have to be priced in that same unit. Without it, "4 rolls of war nickels"
+      // was identified as a single nickel, comps came back as single coins at $5-$10, and the
+      // lot arithmetic multiplied a $6 coin by four to value a lot holding $573 of silver.
+      return { count: n, unit: m[5] ? singularUnit(m[5]).toLowerCase() : null,
+               how: "the dealer stated the count" };
   }
   const w = WORD_COUNT_RE.exec(both);
   if (w) {
@@ -1274,6 +1297,8 @@ export async function appraise(env, req) {
   // "256 gb total" is what the dealer typed; "SK Hynix 32GB DDR4-2400 ECC RDIMM" is what finds comps.
   let searchName = ident.name;
   let idConflict = null;
+  // Set only when metal-per-piece and market-per-piece independently agree — see the lot block.
+  let corroborated = false;
   if (ignoresDealer(ident.name, req.description)) {
     // ignoresDealer means the model's name shares NOT ONE significant word with what the dealer
     // wrote. That covers two very different situations, and the difference is how much the dealer
@@ -1336,6 +1361,12 @@ export async function appraise(env, req) {
 
   const comparables = [];
   let rejected = [];
+  // Search in the unit the dealer counted in. They wrote "4 rolls"; the model called the item a
+  // "World War II Jefferson Silver Nickel", so eBay returned single coins at $5-$10 and the lot
+  // arithmetic multiplied a $6 coin by four — for a lot holding $573 of silver. The count and
+  // the unit come from the same six words of the dealer's, and only the count was being used.
+  if (lotInfo && lotInfo.unit && !new RegExp(`\\b${lotInfo.unit}s?\\b`, "i").test(searchName))
+    searchName = `${searchName} ${lotInfo.unit}`;
   const q = compsQuery({ ...ident, name: searchName });
   // eBay first: it is the only live, free, permitted price feed we have. Tavily backfills the
   // categories eBay is thin on, and covers us entirely when no eBay keys are configured.
@@ -1532,6 +1563,10 @@ export async function appraise(env, req) {
     // particular comparison is worth anything when comparing the totals is not.
     const d = melt && melt.applied && marketShown
       ? unitDisagreement(melt.value, lot.count, marketShown.median) : null;
+    // Agreement here is the one piece of corroboration in this pipeline that does not come from
+    // the identification, because the count came from the dealer. It is worth more than the
+    // model's opinion of its own confidence.
+    if (d && d < 2) corroborated = true;
     if (d && d >= 2) {
       const perUnit = Math.round(melt.value / lot.count);
       warnings.push(`metal content and the market disagree about what one piece is: $${perUnit} of ` +
@@ -1564,7 +1599,16 @@ export async function appraise(env, req) {
     // comps median of $159 and would have failed one. Coherence scoring inverts on both. The
     // dealer's own words are the only signal here that is not downstream of the identification,
     // because they are holding the object.
-    needs_clarification: (idConflict || clamp(first.confidence ?? 0.5) < 0.55) ? {
+    // A conflict with the dealer ALWAYS gates. Low self-reported confidence gates too — unless
+    // two independent routes have since agreed on what the thing is worth. When a lot is
+    // detected the count comes from the dealer, so metal-per-piece and asking-price-per-piece
+    // are not both downstream of the identification; when those land within 2x of each other,
+    // the item is corroborated better than any confidence number the model reports about itself.
+    // Live: "Roll of WWII Jefferson silver nickels", 50% confident, $144 of silver per roll
+    // against a $132 median for four actual rolls. Withholding a price there would be asking a
+    // dealer to confirm something the evidence had already settled — and a gate that fires when
+    // it is not needed is how a gate gets ignored when it is.
+    needs_clarification: shouldGate(idConflict, clamp(first.confidence ?? 0.5), corroborated) ? {
       reason: idConflict
         ? "your description and the photographs disagree about what this is"
         : `the photographs do not settle what this is (${Math.round(clamp(first.confidence ?? 0.5) * 100)}% confident)`,

@@ -1,6 +1,6 @@
 // Run:  node worker/tests/coherence_test.mjs
 // Melt per piece against the asking price per piece. Every figure below is from a real run.
-import { unitDisagreement } from "../appraiser.js";
+import { unitDisagreement, shouldGate, CONFIDENCE_FLOOR } from "../appraiser.js";
 
 let pass = 0, fail = 0;
 const eq = (n, got, want) => {
@@ -32,6 +32,27 @@ eq("negative melt", unitDisagreement(-584, 4, 132), null);
 // Borderline: the warning fires at 2x and not below it.
 eq("just under the line", unitDisagreement(400, 4, 51) < 2, true);
 eq("just over the line", unitDisagreement(400, 4, 49) >= 2, true);
+
+// ---- when the price is withheld ----
+const CONFLICT = { model: "2023 clad quarter", dealer: "4 rolls of war nickels" };
+
+// A disagreement with the dealer always gates. No amount of corroboration settles WHICH of two
+// different objects it is, because every other signal is downstream of the model's reading.
+eq("conflict gates even when confident", shouldGate(CONFLICT, 0.95, false), true);
+eq("conflict gates even when corroborated", shouldGate(CONFLICT, 0.95, true), true);
+
+// Low self-reported confidence gates on its own.
+eq("low confidence gates", shouldGate(null, 0.4, false), true);
+eq("just under the floor gates", shouldGate(null, CONFIDENCE_FLOOR - 0.01, false), true);
+eq("at the floor does not", shouldGate(null, CONFIDENCE_FLOOR, false), false);
+eq("confident does not gate", shouldGate(null, 0.9, false), false);
+
+// ...unless metal-per-piece and market-per-piece have already agreed. Live, 2026-09-24: "Roll of
+// WWII Jefferson silver nickels" at 50% confidence, $144 of silver per roll against a $132
+// median for four actual rolls. Asking the dealer to confirm what the evidence has settled is
+// how a gate gets ignored on the day it matters.
+eq("corroboration overrides low confidence", shouldGate(null, 0.5, true), false);
+eq("corroboration is irrelevant when already confident", shouldGate(null, 0.9, true), false);
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
