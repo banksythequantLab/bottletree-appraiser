@@ -616,10 +616,15 @@ async function renderItemDetail(id) {
       <div class="muted" style="font-size:.85rem">${[r.identification.maker, r.identification.period, r.identification.origin, r.identification.style].filter(Boolean).map(esc).join(" · ")}</div>
       ${nc ? `<div style="margin:12px 0;padding:10px 12px;border:1px solid var(--rust);border-radius:10px;background:var(--bg)">
           <b style="font-size:.95rem">No price yet — ${esc(nc.reason)}.</b>
-          ${nc.candidates ? `<div style="margin-top:6px;font-size:.85rem">It could be <b>${esc(nc.candidates[0])}</b> or <b>${esc(nc.candidates[1])}</b>. Those are different items at different prices, so a number here would be a guess dressed up as an estimate.</div>` : ""}
-          <div style="margin-top:6px;font-size:.85rem"><b>${esc(nc.question)}</b></div>
-          <textarea id="clarify" rows="2" style="margin-top:6px" placeholder="Answer here — a few words is enough"></textarea>
-          <div style="height:6px"></div>
+          ${nc.candidates ? `<div style="margin-top:6px;font-size:.85rem">Those are different items at different prices, so a number here would be a guess dressed up as an estimate. <b>Which is it?</b>
+            <div class="seg" style="margin-top:6px">${nc.candidates.map((c, n) =>
+              `<button type="button" data-pick="${n}">${esc(c.length > 52 ? c.slice(0, 50) + "…" : c)}</button>`).join("")}</div>
+            <div class="muted" style="margin-top:4px;font-size:.78rem">One tap settles it — or answer below instead.</div>
+          </div>` : ""}
+          ${(nc.questions && nc.questions.length ? nc.questions : [nc.question]).map((q, n) => `
+            <div style="margin-top:8px;font-size:.85rem"><b>${esc(q)}</b></div>
+            <input id="clarify${n}" style="margin-top:4px" placeholder="${n === 0 ? "A few words is enough" : "Optional"}">`).join("")}
+          <div style="height:8px"></div>
           <button class="btn sm" id="clarifyGo">Answer &amp; price it</button>
           ${r.melt && r.melt.applied ? `<div class="muted" style="margin-top:8px;font-size:.8rem">What we do know: it holds <b>$${r.melt.value}</b> of ${esc(r.melt.metal)} at today's spot — but that figure assumes the identification too.</div>` : ""}
         </div>`
@@ -709,11 +714,33 @@ async function renderItemDetail(id) {
   // The answer is appended to the DEALER's stored description — item.description — not to the
   // listing box on this form, which holds the model's prose. Appending to that box would feed
   // the model's own words back as the dealer's.
+  // A tap on a candidate is the fastest way out of a contested identification: the dealer is
+  // holding the object and already knows which of the two it is.
+  const answerWith = async (text, btn) => {
+    if (btn) { btn.disabled = true; btn.textContent = "Pricing…"; }
+    await rerun({ dealer_description: [String(item.description || "").trim(), text].filter(Boolean).join(". ") });
+  };
+  app.querySelectorAll("[data-pick]").forEach(b => b.onclick = () => {
+    const pick = (nc && nc.candidates || [])[+b.dataset.pick];
+    if (!pick) return;
+    // One of the two candidates IS the dealer's own description, so picking it adds nothing —
+    // appending it produced "These are 4 rolls of world war 2 silver nickels. It is These are 4
+    // rolls of world war 2 silver nickels". Confirming what you already said just re-runs; only
+    // choosing the model's reading is new information.
+    const have = String(item.description || "").toLowerCase();
+    const said = pick.toLowerCase().trim();
+    answerWith(have.includes(said) ? "" : `It is ${pick}`, b);
+  });
+  // Otherwise each question the model asked gets its own line, and the answers go back as the
+  // dealer's own words, paired with the question so they read as statements later.
   if ($("#clarifyGo")) $("#clarifyGo").onclick = async () => {
-    const a = $("#clarify").value.trim();
-    if (!a) { $("#clarify").focus(); return toast("A few words is enough — what is it?"); }
-    $("#clarifyGo").disabled = true; $("#clarifyGo").textContent = "Pricing…";
-    await rerun({ dealer_description: [String(item.description || "").trim(), a].filter(Boolean).join(". ") });
+    const qs = (nc.questions && nc.questions.length ? nc.questions : [nc.question]);
+    const answered = qs.map((q, n) => {
+      const v = ($("#clarify" + n) || {}).value;
+      return v && v.trim() ? `${q.replace(/\?+$/, "")}: ${v.trim()}` : null;
+    }).filter(Boolean);
+    if (!answered.length) { const f = $("#clarify0"); if (f) f.focus(); return toast("A few words is enough — what is it?"); }
+    await answerWith(answered.join(". "), $("#clarifyGo"));
   };
   if ($("#retry")) $("#retry").onclick = rerun;
   if (pending) pollT = setTimeout(() => renderItemDetail(id), 4000);

@@ -1544,6 +1544,11 @@ export async function appraise(env, req) {
       candidates: idConflict ? [idConflict.model, idConflict.dealer] : null,
       question: clean(strs(first.questions_for_dealer))[0] ||
         "What is it, in a few words — and is there any writing or stamp on it?",
+      // Everything the model said would change the appraisal, not just the first. A dealer at a
+      // sale will answer three short questions in the time it takes to think of one sentence,
+      // and each answer goes back as their own words — the only input here that is not
+      // downstream of the identification being questioned.
+      questions: clean(strs(first.questions_for_dealer)).slice(0, 3),
     } : null,
     // The judged market is the headline; the unjudged pool stays available rather than being
     // thrown away, so nothing is hidden from a dealer who wants to see everything eBay returned.
