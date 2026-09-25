@@ -140,8 +140,8 @@ const item = (db, id) => db.prepare("SELECT * FROM items WHERE id=?").get(id);
 
 // ---------- where a void meets a statement ----------
 // Road Show and Bottle Tree are two workers over one database. Bottle Tree writes statements;
-// Road Show only has to refuse to destroy items that are on one, so it does not run this query
-// and must not be failed for its absence. Where the query does exist it still has to match.
+// Road Show only has to refuse to destroy items that are on one, so it does not run the
+// statement queries and must not be failed for their absence. Where they exist they must match.
 const HAS_STATEMENTS_API = SOURCE.includes("FROM statements st JOIN sellers s");
 const liveIfStatements = (name, sql) => HAS_STATEMENTS_API ? live(name, sql) : sql;
 const SQL_SETTLE_ITEMS = liveIfStatements("a statement gathers a dealer's sold items",
@@ -216,6 +216,59 @@ const forDealer = db => db.prepare(SQL_SETTLE_ITEMS).all("se1", "u1", "2026-08-0
     "SELECT st.id FROM statement_items si JOIN statements st ON st.id=si.statement_id " +
     "WHERE st.status IN ('issued','paid') AND si.item_id IN ('i1')").all();
   eq("a draft statement raises no warning", hits.length, 0);
+}
+
+{
+  // Deleting a sale is refused when its items are on a statement that went out. The wording
+  // has to differ: an issued statement can be voided, a paid one cannot, so telling the owner
+  // to "void it first" there would send them to a button that refuses them.
+  const GUARD = liveIfStatements("the delete guard separates paid from merely issued",
+    "SELECT COUNT(*) AS n, SUM(st.status='paid') AS paid FROM statement_items si " +
+    "JOIN statements st ON st.id=si.statement_id " +
+    "WHERE st.status IN ('issued','paid') AND si.item_id IN (SELECT id FROM items WHERE sale_id=?)");
+  const withStatement = status => {
+    const db = seed();
+    sell(db, ["i1", "i2"]);
+    db.prepare(
+      "INSERT INTO statements (id,user_id,seller_id,period_start,period_end,basis,commission_pct,rent_cents," +
+      "gross_cents,commission_cents,rent_charged_cents,adjust_cents,net_cents,item_count,status,created_at) " +
+      "VALUES ('stx','u1','se1','2026-08-01','2026-08-31','sold_at',35,4500,24000,8400,4500,0,11100,2,?,'2026-09-01T09:00:00Z')")
+      .run(status);
+    db.prepare("INSERT INTO statement_items (id,statement_id,item_id,name,price_cents,sold_at) VALUES ('sx1','stx','i1','Red Wing crock',18000,'2026-08-04T14:00:00Z')").run();
+    return db.prepare(GUARD).get("sa1");
+  };
+  eq("an issued statement blocks the delete", withStatement("issued").n, 1);
+  eq("and is not reported as paid", withStatement("issued").paid, 0);
+  eq("a paid statement blocks it too", withStatement("paid").n, 1);
+  eq("and is reported as paid, so the message can say so", withStatement("paid").paid, 1);
+  eq("a draft blocks nothing", withStatement("draft").n, 0);
+  eq("and a sale with no statement at all is free to go", (() => {
+    const db = seed(); sell(db, ["i1"]); return db.prepare(GUARD).get("sa1").n; })(), 0);
+}
+
+{
+  // An adjustment is what the app now tells the owner to use whenever a correction cannot go
+  // in the item list. It has to survive the round trip into the statement it was saved with.
+  const db = seed();
+  const s = settle({ items: [], commission_pct: 35, rent_cents: 4500,
+                     adjustments: [{ label: "crock returned", cents: -11700 },
+                                   { label: "shelf she paid for", cents: 2000 }] });
+  eq("adjustments move the net in both directions", s.adjust_cents, -9700);
+  eq("and land in the net", s.net_cents, -4500 - 9700);
+  db.prepare(
+    "INSERT INTO statements (id,user_id,seller_id,period_start,period_end,basis,commission_pct,rent_cents," +
+    "gross_cents,commission_cents,rent_charged_cents,adjust_cents,net_cents,item_count,status,created_at) " +
+    "VALUES ('sta','u1','se1','2026-09-01','2026-09-30','sold_at',35,4500,?,?,?,?,?,?,'draft','2026-10-01T09:00:00Z')")
+    .run(s.gross_cents, s.commission_cents, s.rent_charged_cents, s.adjust_cents, s.net_cents, s.item_count);
+  for (const a of [{ label: "crock returned", cents: -11700 }, { label: "shelf she paid for", cents: 2000 }])
+    db.prepare("INSERT INTO statement_adjustments (id,statement_id,label,cents,created_at) VALUES (?,'sta',?,?,'2026-10-01T09:00:00Z')")
+      .run("adj" + a.cents, a.label, a.cents);
+  const back = db.prepare("SELECT * FROM statement_adjustments WHERE statement_id='sta' ORDER BY cents").all();
+  eq("both adjustments are stored", back.length, 2);
+  eq("a deduction keeps its sign", back[0].cents, -11700);
+  eq("and its label, which is the only explanation the dealer gets", back[0].label, "crock returned");
+  eq("a credit keeps its sign too", back[1].cents, 2000);
+  eq("the frozen net includes them", db.prepare("SELECT net_cents c FROM statements WHERE id='sta'").get().c, -14200);
 }
 
 console.log(`${passed} passed, ${failed} failed`);
