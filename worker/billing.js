@@ -77,26 +77,41 @@ export async function applyRevenueCatEvent(db, ev) {
   if (dup) return { ok: true, applied: false, note: "duplicate" };
 
   const prod = key ? PRODUCTS[key] : null;
-  let creditsDelta = 0, plan = null, planExpires = null, applied = false;
+  let creditsDelta = 0, plan = null, planExpires = null, applied = false, grant = null;
 
+  // The grant is BUILT here and run below, together with the ledger row, in one transaction.
+  // Running them as two separate awaits was a money leak: RevenueCat retries on any non-2xx,
+  // so if the worker died or D1 hiccuped after the credits landed but before the ledger row
+  // was written, the retry found no row to dedupe against and granted the purchase a second
+  // time. Silently — the ledger would show one grant and the user would have two.
   if (prod?.kind === "credits" && (type === "NON_RENEWING_PURCHASE" || type === "INITIAL_PURCHASE")) {
     creditsDelta = prod.credits; applied = true;
-    await db.prepare("UPDATE users SET credits=credits+?, rc_app_user_id=? WHERE id=?").bind(creditsDelta, ev.original_app_user_id || userId, userId).run();
+    grant = db.prepare("UPDATE users SET credits=credits+?, rc_app_user_id=? WHERE id=?").bind(creditsDelta, ev.original_app_user_id || userId, userId);
   } else if (prod?.kind === "plan") {
     if (["INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE", "TRANSFER"].includes(type)) {
       plan = prod.plan; planExpires = ev.expiration_at_ms ? new Date(ev.expiration_at_ms).toISOString() : null; applied = true;
-      await db.prepare("UPDATE users SET plan=?, plan_expires_at=?, rc_app_user_id=? WHERE id=?").bind(plan, planExpires, ev.original_app_user_id || userId, userId).run();
+      grant = db.prepare("UPDATE users SET plan=?, plan_expires_at=?, rc_app_user_id=? WHERE id=?").bind(plan, planExpires, ev.original_app_user_id || userId, userId);
     } else if (type === "EXPIRATION") {
       plan = "free"; applied = true;
-      await db.prepare("UPDATE users SET plan='free', plan_expires_at=NULL WHERE id=? AND plan=?").bind(userId, prod.plan).run();
+      grant = db.prepare("UPDATE users SET plan='free', plan_expires_at=NULL WHERE id=? AND plan=?").bind(userId, prod.plan);
     }
     // CANCELLATION / BILLING_ISSUE: access continues until expiration_at_ms; EXPIRATION will arrive then.
   } else if (type === "REFUND" && prod?.kind === "credits") {
     creditsDelta = -prod.credits; applied = true;
-    await db.prepare("UPDATE users SET credits=MAX(0,credits+?) WHERE id=?").bind(creditsDelta, userId).run();
+    grant = db.prepare("UPDATE users SET credits=MAX(0,credits+?) WHERE id=?").bind(creditsDelta, userId);
   }
 
-  await db.prepare("INSERT INTO billing_events (id,user_id,source,event_id,type,product_id,credits_delta,plan,raw_json,created_at) VALUES (?,?,'revenuecat',?,?,?,?,?,?,?)")
-    .bind(uid(), userId, ev.id || null, type, ev.product_id || null, creditsDelta, plan, JSON.stringify(ev).slice(0, 8000), now()).run();
+  const ledger = db.prepare("INSERT INTO billing_events (id,user_id,source,event_id,type,product_id,credits_delta,plan,raw_json,created_at) VALUES (?,?,'revenuecat',?,?,?,?,?,?,?)")
+    .bind(uid(), userId, ev.id || null, type, ev.product_id || null, creditsDelta, plan, JSON.stringify(ev).slice(0, 8000), now());
+  try {
+    // D1's batch is a transaction: either the grant and its record both land, or neither does.
+    await db.batch(grant ? [grant, ledger] : [ledger]);
+  } catch (e) {
+    // billing_events.event_id is UNIQUE, so two deliveries racing past the check above collide
+    // here and the whole batch rolls back — including the second grant. That is the constraint
+    // doing its job, not a failure, so it is answered 2xx and RevenueCat stops retrying.
+    if (/UNIQUE|constraint/i.test(String(e && e.message))) return { ok: true, applied: false, note: "duplicate" };
+    throw e;
+  }
   return { ok: true, applied, note: applied ? `${type} ${key || ev.product_id}` : `ignored ${type} ${ev.product_id || ""}` };
 }
