@@ -9,6 +9,17 @@
 // webhook arrived — the buyer's money was taken and the order sat "pending" forever with nobody
 // told.
 
+// Online checkout needs BOTH halves of the Stripe configuration, and refuses to open on one.
+//
+// This is not tidiness. A secret key on its own lets a buyer pay; without the signing secret
+// the webhook handler rejects every delivery before it looks at a signature, so the payment
+// is never heard about: the item stays listed, the order sits pending forever, and the same
+// piece can be sold again over the counter. Half-configured has to fail closed, because the
+// failure it otherwise produces costs a real person real money and leaves no record of it.
+export function stripeReady(env) {
+  return !!(env && env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET);
+}
+
 // A completed session is only money when Stripe says the payment is settled. 'no_payment_required'
 // is a zero-value session, which our checkout refuses upstream, but if one ever arrives it is
 // settled by definition and must not be left hanging.
