@@ -84,6 +84,28 @@ export async function refundEstimate(db, userId, fundedBy, reason) {
   }
 }
 
+// RevenueCat has no REFUND webhook type. Checked against RevenueCat's own
+// event-types-and-fields docs, Sep 2026: the types are INITIAL_PURCHASE, RENEWAL,
+// CANCELLATION, UNCANCELLATION, NON_RENEWING_PURCHASE, SUBSCRIPTION_PAUSED, EXPIRATION,
+// BILLING_ISSUE, PRODUCT_CHANGE, SUBSCRIPTION_EXTENDED, REFUND_REVERSED, INVOICE_ISSUANCE,
+// TRANSFER, TEST. A refund arrives as CANCELLATION — "A subscription or non-renewing
+// purchase was canceled or refunded" — and cancel_reason says which it was. So the old
+// `type === "REFUND"` branch never fired against the real store: a refunded ten-pack kept
+// its ten credits. "REFUND" is still accepted below, as a free alias, in case RevenueCat
+// ever sends one; it is not what closes the hole.
+const REFUND_TYPES = new Set(["CANCELLATION", "REFUND"]);
+
+// cancel_reason vocabulary (shared with expiration_reason): UNSUBSCRIBE, BILLING_ERROR,
+// DEVELOPER_INITIATED, PRICE_INCREASE, CUSTOMER_SUPPORT, UNKNOWN, SUBSCRIPTION_PAUSED.
+// Only two of those mean the money went back. The rest are a subscriber who switched off
+// auto-renew, a card that failed, or a price rise they declined — all of whom keep the
+// month they paid for, and all of whom get an EXPIRATION when it runs out. UNKNOWN is
+// deliberately not a refund: revoking on a guess bills a paying shop for our uncertainty.
+const REFUND_REASONS = new Set(["CUSTOMER_SUPPORT", "DEVELOPER_INITIATED"]);
+export function cancelIsRefund(ev) {
+  return REFUND_REASONS.has(String((ev && (ev.cancel_reason || ev.cancellation_reason)) || "").toUpperCase());
+}
+
 // RevenueCat webhook (https://www.revenuecat.com/docs/integrations/webhooks). Body: { api_version, event: {...} }.
 // Returns { ok, applied, note }. Idempotent on event.id.
 export async function applyRevenueCatEvent(db, ev) {
@@ -98,32 +120,51 @@ export async function applyRevenueCatEvent(db, ev) {
   if (dup) return { ok: true, applied: false, note: "duplicate" };
 
   const prod = key ? PRODUCTS[key] : null;
-  let creditsDelta = 0, plan = null, planExpires = null, applied = false, grant = null;
+  let creditsDelta = 0, plan = null, planExpires = null, applied = false, grant = null, unrecovered = 0;
 
   // The grant is BUILT here and run below, together with the ledger row, in one transaction.
   // Running them as two separate awaits was a money leak: RevenueCat retries on any non-2xx,
   // so if the worker died or D1 hiccuped after the credits landed but before the ledger row
   // was written, the retry found no row to dedupe against and granted the purchase a second
   // time. Silently — the ledger would show one grant and the user would have two.
-  if (prod?.kind === "credits" && (type === "NON_RENEWING_PURCHASE" || type === "INITIAL_PURCHASE")) {
+  if (prod?.kind === "credits" && (type === "NON_RENEWING_PURCHASE" || type === "INITIAL_PURCHASE" || type === "REFUND_REVERSED")) {
     creditsDelta = prod.credits; applied = true;
     grant = db.prepare("UPDATE users SET credits=credits+?, rc_app_user_id=? WHERE id=?").bind(creditsDelta, ev.original_app_user_id || userId, userId);
+  } else if (prod?.kind === "credits" && REFUND_TYPES.has(type)) {
+    // A credit pack does not auto-renew, so there is no auto-renew to switch off: any
+    // CANCELLATION on one is the store handing the money back. No cancel_reason check here.
+    //
+    // Take back what is actually there, and record that number. The wallet floors at zero —
+    // a shop that already spent refunded credits got free estimates, and a negative balance
+    // would silently eat their next purchase — so writing -10 into the ledger when only 3
+    // came back would put the wallet and its history permanently out of step and make
+    // walletDrift cry wolf for ever after. The shortfall is kept in raw_json instead, where
+    // it is a fact about one refund rather than a phantom bug in every later drift check.
+    const held = await db.prepare("SELECT credits FROM users WHERE id=?").bind(userId).first();
+    const took = Math.min(prod.credits, Math.max(0, (held && held.credits) || 0));
+    unrecovered = prod.credits - took;
+    creditsDelta = -took; applied = true;
+    grant = db.prepare("UPDATE users SET credits=MAX(0,credits-?) WHERE id=?").bind(took, userId);
   } else if (prod?.kind === "plan") {
-    if (["INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE", "TRANSFER"].includes(type)) {
+    if (["INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE", "TRANSFER", "REFUND_REVERSED"].includes(type)) {
       plan = prod.plan; planExpires = ev.expiration_at_ms ? new Date(ev.expiration_at_ms).toISOString() : null; applied = true;
       grant = db.prepare("UPDATE users SET plan=?, plan_expires_at=?, rc_app_user_id=? WHERE id=?").bind(plan, planExpires, ev.original_app_user_id || userId, userId);
-    } else if (type === "EXPIRATION") {
+    } else if (type === "EXPIRATION" || (REFUND_TYPES.has(type) && cancelIsRefund(ev))) {
+      // A refunded subscription loses access now, not at the end of the month it was paid
+      // back for. The plan guard matters: a Pro EXPIRATION arriving after an upgrade to
+      // Unlimited must not knock the new plan out, and the same is true of a late refund.
       plan = "free"; applied = true;
       grant = db.prepare("UPDATE users SET plan='free', plan_expires_at=NULL WHERE id=? AND plan=?").bind(userId, prod.plan);
     }
-    // CANCELLATION / BILLING_ISSUE: access continues until expiration_at_ms; EXPIRATION will arrive then.
-  } else if (type === "REFUND" && prod?.kind === "credits") {
-    creditsDelta = -prod.credits; applied = true;
-    grant = db.prepare("UPDATE users SET credits=MAX(0,credits+?) WHERE id=?").bind(creditsDelta, userId);
+    // CANCELLATION that is not a refund, and BILLING_ISSUE: they paid for the month, so
+    // access continues until expiration_at_ms and EXPIRATION arrives then. SUBSCRIPTION_PAUSED
+    // is the same — RevenueCat is explicit that access is revoked on the EXPIRATION that
+    // follows it, not on the pause itself.
   }
 
   const ledger = db.prepare("INSERT INTO billing_events (id,user_id,source,event_id,type,product_id,credits_delta,plan,raw_json,created_at) VALUES (?,?,'revenuecat',?,?,?,?,?,?,?)")
-    .bind(uid(), userId, ev.id || null, type, ev.product_id || null, creditsDelta, plan, JSON.stringify(ev).slice(0, 8000), now());
+    .bind(uid(), userId, ev.id || null, type, ev.product_id || null, creditsDelta, plan,
+          JSON.stringify(unrecovered ? { ...ev, _unrecovered_credits: unrecovered } : ev).slice(0, 8000), now());
   try {
     // D1's batch is a transaction: either the grant and its record both land, or neither does.
     await db.batch(grant ? [grant, ledger] : [ledger]);
