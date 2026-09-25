@@ -932,7 +932,55 @@ async function renderSummary() {
       ${s.split.length ? s.split.map(r => `<div class="split"><span>${esc(r.seller)} <span class="muted" style="font-size:.82rem">· ${r.items} item${r.items === 1 ? "" : "s"}</span></span><span class="amt">${money(r.cents)}</span></div>`).join("")
         : `<div class="muted" style="padding:10px 0">No sales yet — the split fills in as you sell.</div>`}
     </div>
+    <div class="card">
+      <h3 style="margin-bottom:2px">Transactions</h3>
+      <div class="muted" style="font-size:.8rem;margin-bottom:6px">Rang something up wrong? Void it. The items go back on the shelf and the takings drop, but the line stays so the drawer still adds up.</div>
+      <div id="txnList"></div>
+    </div>
     <div class="muted" style="font-size:.8rem;text-align:center;margin-top:10px">Bottle Tree v0.3 · cash in store, cards online · AI appraisals by NVIDIA Nemotron on Nebius.</div>`;
+  renderTxns();
+}
+
+// The transactions of this sale, newest first, each with a way to undo it. state.detail is
+// already loaded and carries them, so this does not re-fetch.
+const TENDER = { cash: "cash", stripe: "online card", card: "card" };
+function renderTxns() {
+  const el = $("#txnList"); if (!el) return;
+  const rows = (state.detail && state.detail.txns) || [];
+  if (!rows.length) { el.innerHTML = `<div class="muted" style="font-size:.82rem;padding:4px 0">Nothing rung up yet.</div>`; return; }
+  el.innerHTML = rows.map(t => {
+    const dead = t.status === "void";
+    return `<div class="split" style="align-items:center${dead ? ";opacity:.6" : ""}">
+      <span>
+        <span style="${dead ? "text-decoration:line-through" : ""}">${money(t.total_cents)}</span>
+        <span class="muted" style="font-size:.8rem">· ${t.item_count} item${t.item_count === 1 ? "" : "s"} · ${esc(TENDER[t.tender] || t.tender)} · ${esc(String(t.created_at || "").slice(11, 16))}</span>
+        ${dead ? `<div class="muted" style="font-size:.78rem">Voided${t.void_reason ? " — " + esc(t.void_reason) : ""}</div>` : ""}
+      </span>
+      ${dead ? `<span class="pill">void</span>`
+             : `<button class="btn rust sm" data-void="${t.id}" data-amt="${money(t.total_cents)}" style="margin:0">Void</button>`}
+    </div>`;
+  }).join("");
+  el.querySelectorAll("[data-void]").forEach(b => b.onclick = () => voidTxn(b.dataset.void, b.dataset.amt));
+}
+
+async function voidTxn(id, amt) {
+  if (!confirm(`Void this ${amt} sale?\n\nThe items go back on the shelf and the takings drop by ${amt}. The line stays on record as voided so the drawer still reconciles.`)) return;
+  const reason = prompt("What happened? (optional — it goes on the record)") || "";
+  const send = (extra = {}) => api("/sales/" + state.saleId + "/txns/" + id + "/void",
+    { method: "POST", body: JSON.stringify({ reason, ...extra }) });
+  try { await send(); }
+  catch (e) {
+    // The API refuses once, with the detail, when a dealer has already been handed a statement
+    // covering these items. It is still allowed — but the owner has to know the correction
+    // lands on the next statement, not this one.
+    if (!e.needs_acknowledgement) return toast(e.message);
+    if (!confirm(`${e.message}\n\nVoid anyway?`)) return;
+    try { await send({ acknowledge_statements: true }); }
+    catch (e2) { return toast(e2.message); }
+  }
+  toast("Voided");
+  await loadDetail();
+  renderSummary();
 }
 
 // ---------- Dealer payouts (settlements) ----------

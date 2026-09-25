@@ -725,7 +725,7 @@ ${st.note ? `<p class="sub">${esc(st.note)}</p>` : ""}
         if (m === "GET") {
           const { results } = await db.prepare(
             "SELECT s.*, (SELECT COUNT(*) FROM items i WHERE i.sale_id=s.id) AS items, " +
-            "(SELECT COALESCE(SUM(total_cents),0) FROM txns t WHERE t.sale_id=s.id) AS revenue_cents " +
+            "(SELECT COALESCE(SUM(total_cents),0) FROM txns t WHERE t.sale_id=s.id AND t.status='complete') AS revenue_cents " +
             "FROM sales s WHERE s.user_id=? ORDER BY created_at DESC").bind(userId).all();
           return J(results);
         }
@@ -754,7 +754,9 @@ ${st.note ? `<p class="sub">${esc(st.note)}</p>` : ""}
         }
         if (parts.length === 3 && m === "DELETE") {
           // A sale with recorded sales is the dealer's books — refuse unless they say so explicitly.
-          const sold = await db.prepare("SELECT COUNT(*) AS n FROM txns WHERE sale_id=?").bind(sid).first();
+          // A voided transaction is not takings, so it must not be what makes deleting a sale
+          // feel dangerous — otherwise every corrected mistake leaves a permanent scary warning.
+          const sold = await db.prepare("SELECT COUNT(*) AS n FROM txns WHERE sale_id=? AND status='complete'").bind(sid).first();
           if (sold.n && url.searchParams.get("force") !== "1")
             return J({ error: "This sale has recorded sales", sold: sold.n, needs_force: true }, 409);
           const ps = (await db.prepare(
@@ -829,8 +831,61 @@ ${st.note ? `<p class="sub">${esc(st.note)}</p>` : ""}
           await db.prepare(`UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status=CASE WHEN listing_status='live' THEN 'hidden' ELSE listing_status END WHERE id IN (${ph2})`).bind(txnId, now(), ...soldIds).run();
           return J({ txn_id: txnId, total_cents: total, item_count: rows.length });
         }
+        // Undo a sale that should not have happened: wrong tag scanned, customer changed their
+        // mind at the door, card declined after the drawer opened. The transaction is kept and
+        // marked, never deleted — the drawer has to reconcile against something, and "it is not
+        // there any more" is not an explanation anybody can give a customer or an accountant.
+        if (parts[3] === "txns" && parts[5] === "void" && m === "POST") {
+          const t = await db.prepare("SELECT * FROM txns WHERE id=? AND sale_id=?").bind(parts[4], sid).first();
+          if (!t) return J({ error: "not found" }, 404);
+          if (t.status === "void") return J({ error: "This sale was already voided", voided_at: t.voided_at }, 409);
+          // An online sale took real money through Stripe. Marking it void here would put the
+          // books and the card processor permanently out of step, and this app cannot move
+          // money. The refund has to happen where the charge did.
+          if (t.tender === "stripe")
+            return J({ error: "This was an online card sale. Refund it in Stripe first — " +
+                              "voiding it here would leave the books and the card processor disagreeing.",
+                       tender: "stripe" }, 409);
+          const b = await readJson(request);
+          // The items go back on the shelf, but a listing that was pulled down when they sold
+          // stays down: we recorded that it went from live to hidden, not that it should come
+          // back, and silently republishing something to a storefront is not ours to decide.
+          const back = (await db.prepare("SELECT id,name,price_cents FROM items WHERE txn_id=?").bind(t.id).all()).results;
+          // A statement that has already been issued has a frozen copy of these lines, and the
+          // money on it has been promised to a dealer. Voiding is still allowed — a return is a
+          // real event and refusing to record it would be worse — but it cannot be silent: the
+          // correction belongs on the next statement as an adjustment, and the owner has to be
+          // the one who decides that. Drafts do not count; they recompute.
+          const ids = back.map(r => r.id);
+          if (ids.length) {
+            const ph3 = ids.map(() => "?").join(",");
+            const hit = (await db.prepare(
+              "SELECT st.id, st.status, s.name AS seller_name, st.period_start, st.period_end, " +
+              "COUNT(si.id) AS n, COALESCE(SUM(si.price_cents),0) AS cents " +
+              "FROM statement_items si JOIN statements st ON st.id=si.statement_id " +
+              "JOIN sellers s ON s.id=st.seller_id " +
+              `WHERE st.status IN ('issued','paid') AND si.item_id IN (${ph3}) ` +
+              "GROUP BY st.id ORDER BY st.period_start").bind(...ids).all()).results;
+            if (hit.length && b.acknowledge_statements !== true)
+              return J({
+                error: hit.length === 1
+                  ? `${hit[0].n} of these items ${hit[0].n === 1 ? "is" : "are"} on ${hit[0].seller_name}'s ` +
+                    `${hit[0].status} statement for ${hit[0].period_start} to ${hit[0].period_end}. ` +
+                    `Voiding does not change that statement — deduct it on their next one.`
+                  : `These items are on ${hit.length} statements that have already been issued. ` +
+                    `Voiding does not change them — deduct the returns on the next statements.`,
+                statements: hit, needs_acknowledgement: true }, 409);
+          }
+          await db.prepare("UPDATE txns SET status='void', voided_at=?, void_reason=? WHERE id=?")
+            .bind(now(), (b.reason || "").trim().slice(0, 200) || null, t.id).run();
+          // sold_at is what a statement filters on, so clearing it is what actually takes these
+          // items back out of every future payout. status alone would not.
+          await db.prepare("UPDATE items SET status='available', txn_id=NULL, sold_at=NULL WHERE txn_id=?").bind(t.id).run();
+          return J({ voided: t.id, total_cents: t.total_cents, items_returned: back.length,
+                     items: back.map(r => ({ id: r.id, name: r.name })) });
+        }
         if (parts[3] === "summary" && m === "GET") {
-          const totals = await db.prepare("SELECT COALESCE(SUM(total_cents),0) AS revenue_cents, COUNT(*) AS txn_count FROM txns WHERE sale_id=?").bind(sid).first();
+          const totals = await db.prepare("SELECT COALESCE(SUM(total_cents),0) AS revenue_cents, COUNT(*) AS txn_count FROM txns WHERE sale_id=? AND status='complete'").bind(sid).first();
           const sold = await db.prepare("SELECT COUNT(*) AS sold_items FROM items WHERE sale_id=? AND status='sold'").bind(sid).first();
           const avail = await db.prepare("SELECT COUNT(*) AS available_items, COALESCE(SUM(price_cents),0) AS available_cents FROM items WHERE sale_id=? AND status='available'").bind(sid).first();
           const split = (await db.prepare(
