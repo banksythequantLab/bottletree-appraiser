@@ -1,13 +1,29 @@
 # Bottle Tree — what's left, in order
 
-Status as of Sep 19, 2026.
+Status as of Sep 25, 2026.
 
-## 1. RevenueCat credentials — DONE Sep 19, waiting on Google propagation
+## 1. RevenueCat credentials — DONE, propagation resolved, verified Sep 25
 
-RevenueCat has the key file saved. Two of its three checks pass; the failing one is
-"Can validate Google Play subscription purchases". The service account was invited to Play
-but without two required permissions.
+Verified Sep 25 against Google's own API with the RevenueCat service account token:
 
+    purchases/products/estimate_10/tokens/DUMMY   400 Invalid Value   (authorized)
+    purchases/subscriptionsv2/tokens/DUMMY        400 Invalid Value   (authorized)
+    purchases/voidedpurchases                     200 {}
+    monetization oneTimeProducts.list             200  estimate_1 ACTIVE, estimate_10 ACTIVE
+    monetization subscriptions.list               200  pro_monthly/monthly ACTIVE,
+                                                       unlimited_monthly/monthly ACTIVE
+
+400 on a dummy token is the documented "ready" signal (401 was the propagation symptom),
+so purchase validation works. All four SKUs exist and are ACTIVE and match `PRODUCTS`
+in `worker/billing.js` exactly.
+
+Note: `inappproducts.list` returns **403 "Please migrate to the new publishing API"**.
+That is Google deprecating the v3 legacy catalog endpoint, not a permission problem —
+the replacement (`monetization.onetimeproducts.list`, path `oneTimeProducts`) returns 200.
+If RevenueCat's dashboard check "Can read the Google Play in-app product catalog" shows
+red, that is why; it does not affect purchase validation or credit grants.
+
+Original diagnosis kept for history — the permissions fix that unblocked this.
 Open (note **/u/1/** — /u/0/ is a different Google account stuck on a terms page):
 
     https://play.google.com/console/u/1/developers/6615735360865289088/users-and-permissions
@@ -47,9 +63,11 @@ Open (note **/u/1/** — /u/0/ is a different Google account stuck on a terms pa
 - Google Cloud project: `bottletree-app-2026`
 - Play reviewer account: `playreview@bottletree.test` (25 credits preloaded)
 
-> Status Sep 19, 2026: account-level permissions granted and verified via the Play
-> developers/users API — accountPerms now carries the full _GLOBAL set. The purchases
-> API still returns 401; that is Google's propagation lag, not a config error. Verify with:
+> Status Sep 25, 2026: RESOLVED. Account-level permissions were granted Sep 19
+> (accountPerms carries the full _GLOBAL set) and the 401 was Google's propagation lag,
+> as suspected — the purchases API now answers 400 on a dummy token. Re-verify any time
+> with (note: on Windows, node must spawn gcloud.cmd with shell:true, and `$` is eaten by
+> some MCP shells — put the probe in a .mjs file rather than a one-liner):
 >
 >     gcloud auth print-access-token --account=revenuecat@bottletree-app-2026.iam.gserviceaccount.com --scopes=https://www.googleapis.com/auth/androidpublisher
 >
