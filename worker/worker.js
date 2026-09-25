@@ -1,6 +1,6 @@
 // Bottle Tree app v0.3 — API worker: accounts, sales, photos (R2), AI appraisals (Nebius), storefront + Stripe.
 // Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
-import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent } from "./billing.js";
+import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent, welcomeGrant } from "./billing.js";
 import { appraise } from "./appraiser.js";
 import { settle, periodError, canTransition } from "./settlements.js";
 import { webhookAction, fulfilResult, needsAttention } from "./orders.js";
@@ -410,8 +410,13 @@ export default {
           if (pw.length < 8) return J({ error: "Password must be at least 8 characters" }, 400);
           const exists = await db.prepare("SELECT id FROM users WHERE email=?").bind(email).first();
           if (exists) return J({ error: "That email is already registered" }, 409);
-          const salt = randHex(16), h = await pbkdf2(pw, salt), id = uid();
-          await db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,created_at) VALUES (?,?,?,?,?)").bind(id, email, h, salt, now()).run();
+          const salt = randHex(16), h = await pbkdf2(pw, salt), id = uid(), ts = now();
+          // The free estimate and the row recording it go together, so an account can never
+          // exist holding a credit its own history cannot account for.
+          await db.batch([
+            db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,created_at) VALUES (?,?,?,?,?)").bind(id, email, h, salt, ts),
+            welcomeGrant(db, id, ts),
+          ]);
           return J({ email }, 200, { "Set-Cookie": sessionCookie(await newSession(db, id)) });
         }
         if (act === "login" && m === "POST") {
@@ -438,8 +443,12 @@ export default {
             if (u) await db.prepare("UPDATE users SET google_sub=? WHERE id=?").bind(g.sub, u.id).run();
           }
           if (!u) {
-            const id = uid();
-            await db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,google_sub,created_at) VALUES (?,?,'','',?,?)").bind(id, g.email, g.sub, now()).run();
+            const id = uid(), ts = now();
+            // Same opening balance, same record of it, whichever door they came in by.
+            await db.batch([
+              db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,google_sub,created_at) VALUES (?,?,'','',?,?)").bind(id, g.email, g.sub, ts),
+              welcomeGrant(db, id, ts),
+            ]);
             u = { id, email: g.email };
           }
           return J({ email: u.email }, 200, { "Set-Cookie": sessionCookie(await newSession(db, u.id)) });

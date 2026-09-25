@@ -5,7 +5,8 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { d1 } from "./d1shim.mjs";
-import { applyRevenueCatEvent, planFor, consumeEstimate, refundEstimate, productKey, PRODUCTS, PRO_MONTHLY_CAP } from "../billing.js";
+import { applyRevenueCatEvent, planFor, consumeEstimate, refundEstimate, productKey, PRODUCTS, PRO_MONTHLY_CAP,
+         welcomeGrant, walletDrift, WELCOME_CREDITS } from "../billing.js";
 
 const MIG = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
 let passed = 0, failed = 0;
@@ -225,6 +226,52 @@ eq("and neither is nothing", productKey(undefined), null);
   eq("a lapsed plan reads as free", p.plan, "free");
   eq("and pays for nothing", p.can_estimate, false);
   eq("nor does it quietly stay pro", await consumeEstimate(db, "u1"), null);
+}
+
+// ---------- the ledger has to add up ----------
+{
+  // A new account holds one free estimate from the column default. Nothing used to record it,
+  // so every account read as one credit ahead of its own history and a drift check could not
+  // tell a healthy wallet from one that had leaked a credit.
+  const db = d1(MIG);
+  const ts = "2026-09-24T09:00:00Z";
+  await db.batch([
+    db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,created_at) VALUES ('u1','a@b.c','x','y',?)").bind(ts),
+    welcomeGrant(db, "u1", ts),
+  ]);
+  eq("the welcome credit is in the wallet", user(db).credits, WELCOME_CREDITS);
+  eq("and on the ledger", ledger(db).filter(r => r.type === "welcome").length, 1);
+  eq("attributed to signing up", ledger(db)[0].source, "signup");
+  eq("a fresh account reconciles", (await walletDrift(db, "u1")).drift, 0);
+
+  await applyRevenueCatEvent(db, ev({ id: "w1", product_id: "estimate_10" }));
+  eq("still reconciles after a purchase", (await walletDrift(db, "u1")).drift, 0);
+  await consumeEstimate(db, "u1");
+  eq("and after spending one", (await walletDrift(db, "u1")).drift, 0);
+  await refundEstimate(db, "u1", "credit", "failed");
+  eq("and after a refund", (await walletDrift(db, "u1")).drift, 0);
+  eq("the wallet is what the history says", (await walletDrift(db, "u1")).wallet, 11);
+
+  // The check has to be able to see a leak, or it is decoration.
+  db.raw.prepare("UPDATE users SET credits=credits+5 WHERE id='u1'").run();
+  eq("credits appearing from nowhere show up as drift", (await walletDrift(db, "u1")).drift, 5);
+  eq("and an unknown account has no answer", await walletDrift(db, "nobody"), null);
+}
+
+{
+  // The account and its opening balance are one transaction, so a half-made account cannot
+  // exist holding a credit nothing accounts for.
+  const db = d1(MIG);
+  let threw = false;
+  try {
+    await db.batch([
+      db.prepare("INSERT INTO users (id,email,pw_hash,pw_salt,created_at) VALUES ('u2','c@d.e','x','y','2026-09-24T09:00:00Z')"),
+      db.prepare("INSERT INTO billing_events (id,user_id,source,type,credits_delta,created_at) VALUES (?,?,'signup','welcome',1,?)")
+        .bind("dup", "u2", null),   // created_at is NOT NULL: this fails, and takes the account with it
+    ]);
+  } catch { threw = true; }
+  ok("a failed opening balance fails the signup", threw);
+  eq("and leaves no account behind", db.raw.prepare("SELECT COUNT(*) n FROM users").get().n, 0);
 }
 
 eq("the price list is the one on the paywall", Object.keys(PRODUCTS).join(","),
