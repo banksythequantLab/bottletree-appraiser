@@ -20,6 +20,27 @@ export function productKey(productId) {
   return PRODUCTS[base] ? base : null;
 }
 
+// Every new account starts with one free estimate, granted by the column default on
+// users.credits. Nothing recorded it, so the ledger could not be reconciled against the
+// wallet: every account sat exactly one credit ahead of its own history, which makes a drift
+// check useless — a real leak of one credit would look identical to a healthy account.
+// Recording the opening balance is what turns that check into something worth running.
+export const WELCOME_CREDITS = 1;
+export function welcomeGrant(db, userId, at) {
+  return db.prepare("INSERT INTO billing_events (id,user_id,source,type,credits_delta,created_at) VALUES (?,?,'signup','welcome',?,?)")
+    .bind(uid(), userId, WELCOME_CREDITS, at || now());
+}
+
+// What the ledger says an account should be holding. Only meaningful because the opening
+// balance is now in it; accounts created before that, and any hand-topped-up wallet, will
+// read as drifted, which is history rather than a fault.
+export async function walletDrift(db, userId) {
+  const u = await db.prepare("SELECT credits FROM users WHERE id=?").bind(userId).first();
+  if (!u) return null;
+  const l = await db.prepare("SELECT COALESCE(SUM(credits_delta),0) AS n FROM billing_events WHERE user_id=?").bind(userId).first();
+  return { wallet: u.credits, ledger: l.n, drift: u.credits - l.n };
+}
+
 export async function planFor(db, userId) {
   const u = await db.prepare("SELECT plan, plan_expires_at, credits FROM users WHERE id=?").bind(userId).first();
   if (!u) return null;
