@@ -2,7 +2,7 @@
 // Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
 import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent, welcomeGrant } from "./billing.js";
 import { appraise } from "./appraiser.js";
-import { webhookAction, fulfilResult, needsAttention } from "./orders.js";
+import { webhookAction, fulfilResult, needsAttention, stripeReady } from "./orders.js";
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const enc = new TextEncoder();
@@ -241,7 +241,9 @@ async function renderItem(db, env, slug, itemId, paid) {
   const main = firstPhoto(photos);
   const gallery = photos.length ? `<div class="gal"><img id="mainImg" src="${esc(main.url)}" alt=""><div class="thumbs">${photos.map(p => `<img src="${esc(p.url)}" alt="${esc(p.kind)}" onclick="document.getElementById('mainImg').src=this.src">`).join("")}</div></div>` : `<div class="gal"></div>`;
   const pills = [ident.maker, ident.period, ident.origin, appraisal?.result?.listing?.condition_grade].filter(Boolean).map(x => `<span class="pill">${esc(x)}</span>`).join("");
-  const buy = sold ? `<div class="meta"><b>Sold</b></div>` : (env.STRIPE_SECRET_KEY
+  // The same readiness test as the endpoint, so a shopper is never shown a Buy button that
+  // answers 503 — or worse, one that charges them with nothing listening for the receipt.
+  const buy = sold ? `<div class="meta"><b>Sold</b></div>` : (stripeReady(env)
     ? `<form method="post" action="/api/public/checkout"><input type="hidden" name="item_id" value="${item.id}"><button class="btn">Buy now — ${money(item.price_cents)}</button></form>`
     : `<div class="meta">Contact the shop to purchase.</div>`);
   const body = `<div class="item">${gallery}<div>${paid ? `<div class="ok">Thank you — your payment went through.</div>` : ""}
@@ -282,7 +284,11 @@ export default {
           return J({ shop: { slug: shop.shop_slug, name: shop.shop_name, blurb: shop.shop_blurb }, items });
         }
         if (parts[2] === "checkout" && m === "POST") {
-          if (!env.STRIPE_SECRET_KEY) return J({ error: "online checkout not enabled" }, 503);
+          // Both halves or neither. Taking a payment you cannot hear the confirmation for is
+          // worse than not taking it: the buyer is charged, the webhook is rejected for want of
+          // a signing secret, the item stays on sale and the order sits pending forever. A key
+          // installed without its webhook secret is a trap, so it does not open the door.
+          if (!stripeReady(env)) return J({ error: "online checkout not enabled" }, 503);
           const ct = request.headers.get("content-type") || "";
           const itemId = ct.includes("json") ? (await readJson(request)).item_id : (await request.formData()).get("item_id");
           const row = await db.prepare("SELECT i.*, u.shop_slug, u.shop_name FROM items i JOIN sales s ON s.id=i.sale_id JOIN users u ON u.id=s.user_id WHERE i.id=? AND i.listing_status='live' AND i.status='available'").bind(itemId).first();

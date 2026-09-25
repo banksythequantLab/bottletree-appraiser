@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { webhookAction, sessionIsPaid, fulfilResult, needsAttention, NEEDS_REFUND_NOTE } from "../orders.js";
+import { webhookAction, sessionIsPaid, fulfilResult, needsAttention, stripeReady, NEEDS_REFUND_NOTE } from "../orders.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 let passed = 0, failed = 0;
@@ -50,6 +50,17 @@ eq("and one expanded into an object is too", webhookAction(ev("checkout.session.
   { payment_status: "paid", payment_intent: { id: "pi_456" } })).payment_intent, "pi_456");
 eq("and its absence is null, not undefined",
   webhookAction(ev("checkout.session.completed", { payment_status: "paid" })).payment_intent, null);
+
+// ---------- half-configured has to fail closed ----------
+// A secret key without a signing secret is the worst state to be in: buyers can pay, and the
+// webhook rejects every delivery before it checks a signature, so nothing is ever recorded.
+const KEY = "sk_test_x", WH = "whsec_x";
+ok("both halves opens checkout", stripeReady({ STRIPE_SECRET_KEY: KEY, STRIPE_WEBHOOK_SECRET: WH }));
+ok("a secret key alone does NOT", !stripeReady({ STRIPE_SECRET_KEY: KEY }));
+ok("a signing secret alone does not either", !stripeReady({ STRIPE_WEBHOOK_SECRET: WH }));
+ok("nor does neither", !stripeReady({}));
+ok("nor an empty string standing in for a key", !stripeReady({ STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: WH }));
+ok("and no env at all is not ready", !stripeReady(undefined));
 
 ok("payment_status paid is settled", sessionIsPaid({ payment_status: "paid" }));
 ok("payment_status unpaid is not", !sessionIsPaid({ payment_status: "unpaid" }));
