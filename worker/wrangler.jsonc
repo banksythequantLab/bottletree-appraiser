@@ -32,6 +32,12 @@
     "TEXT_MODEL": "nvidia/nemotron-3-super-120b-a12b",
     "VISION_MODEL": "google/gemma-3-27b-it",
     "PUBLIC_ORIGIN": "https://roadshow-app.dj-b02.workers.dev",
+    // The Stripe account online sales are paid INTO. A shop may use the Buy button only when its
+    // users.stripe_account_id equals this, which today means only the platform owner's own shops
+    // (see shopCanSellOnline in orders.js). Not a secret: it is an account id, not a key, and the
+    // secrets it works with (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET) are not set on this worker
+    // at all yet — until they are, stripeReady() is false and nobody takes a card here.
+    "STRIPE_PLATFORM_ACCOUNT": "acct_1RZvItErbZFpxnC1",
     // RevenueCat public SDK key for the Play Store app (Play service credentials validated 2026-09-20)
     // Google OAuth *web* client ID (project bottletree-app-2026). Public by design — it ships in the
     // page and is the `aud` we require on every ID token. The client *secret* is not used: we verify

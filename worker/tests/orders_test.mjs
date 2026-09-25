@@ -8,7 +8,8 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { webhookAction, sessionIsPaid, fulfilResult, needsAttention, stripeReady, NEEDS_REFUND_NOTE } from "../orders.js";
+import { webhookAction, sessionIsPaid, fulfilResult, needsAttention, stripeReady, shopCanSellOnline,
+         NEEDS_REFUND_NOTE } from "../orders.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 let passed = 0, failed = 0;
@@ -61,6 +62,41 @@ ok("a signing secret alone does not either", !stripeReady({ STRIPE_WEBHOOK_SECRE
 ok("nor does neither", !stripeReady({}));
 ok("nor an empty string standing in for a key", !stripeReady({ STRIPE_SECRET_KEY: "", STRIPE_WEBHOOK_SECRET: WH }));
 ok("and no env at all is not ready", !stripeReady(undefined));
+
+// ---------- one Stripe key, many shops ----------
+// Road Show is given away to estate-sale companies and shop owners, and a single platform key
+// means every storefront's Buy button pays the platform. Correct for the platform's own shop,
+// wrong for everyone else's — their money, their chargebacks, someone else's account.
+const PLAT = "acct_platform";
+const ENV = { STRIPE_SECRET_KEY: KEY, STRIPE_WEBHOOK_SECRET: WH, STRIPE_PLATFORM_ACCOUNT: PLAT };
+ok("the platform's own shop may take cards", shopCanSellOnline(ENV, { stripe_account_id: PLAT }));
+ok("a shop with no Stripe account may NOT", !shopCanSellOnline(ENV, { stripe_account_id: null }));
+ok("nor one that has never been set", !shopCanSellOnline(ENV, {}));
+// The case this exists for: a real Stripe account that is not the platform's. Paying into it
+// needs Connect, which does not exist yet, so the honest answer is no rather than "charge the
+// platform and sort it out later".
+ok("nor somebody else's real Stripe account", !shopCanSellOnline(ENV, { stripe_account_id: "acct_someone_else" }));
+ok("an empty string is not a match for an empty platform",
+   !shopCanSellOnline({ ...ENV, STRIPE_PLATFORM_ACCOUNT: "" }, { stripe_account_id: "" }));
+ok("no platform account configured means nobody sells",
+   !shopCanSellOnline({ STRIPE_SECRET_KEY: KEY, STRIPE_WEBHOOK_SECRET: WH }, { stripe_account_id: PLAT }));
+// The half-configured rule still governs: no signing secret, no card payments, for anyone.
+ok("and the platform's own shop still cannot sell without a webhook secret",
+   !shopCanSellOnline({ STRIPE_SECRET_KEY: KEY, STRIPE_PLATFORM_ACCOUNT: PLAT }, { stripe_account_id: PLAT }));
+ok("a missing shop is not a seller", !shopCanSellOnline(ENV, null));
+// Road Show's own deployment: no Stripe secrets at all, which is why nothing is broken today.
+// This is the state the gate has to be safe in, not a hypothetical.
+ok("with no Stripe configured, not even the platform's shop sells",
+   !shopCanSellOnline({ STRIPE_PLATFORM_ACCOUNT: PLAT }, { stripe_account_id: PLAT }));
+
+// The storefront and the endpoint must agree. A Buy button shown to a shopper whose checkout
+// then refuses is the bug this pair of call sites exists to prevent, so both must be present
+// and both must read the shop row, not just the env.
+const WSRC = readFileSync(join(root, "worker.js"), "utf8");
+ok("the checkout endpoint gates on the shop", /shopCanSellOnline\(env, row\)/.test(WSRC));
+ok("the item page gates on the same shop", /shopCanSellOnline\(env, shop\)/.test(WSRC));
+ok("the checkout query actually selects the account it gates on", /u\.stripe_account_id FROM items i/.test(WSRC));
+ok("and so does the item page's shop lookup", /shop_blurb, stripe_account_id FROM users WHERE shop_slug/.test(WSRC));
 
 ok("payment_status paid is settled", sessionIsPaid({ payment_status: "paid" }));
 ok("payment_status unpaid is not", !sessionIsPaid({ payment_status: "unpaid" }));
