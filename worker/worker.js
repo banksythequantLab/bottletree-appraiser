@@ -833,13 +833,24 @@ ${st.note ? `<p class="sub">${esc(st.note)}</p>` : ""}
           // them would not, and "where did the March sale go" is not a question to answer after
           // the fact. Drafts do not block: nothing has been handed over yet.
           const settled = await db.prepare(
-            "SELECT COUNT(*) AS n FROM statement_items si JOIN statements st ON st.id=si.statement_id " +
+            "SELECT COUNT(*) AS n, SUM(st.status='paid') AS paid FROM statement_items si " +
+            "JOIN statements st ON st.id=si.statement_id " +
             "WHERE st.status IN ('issued','paid') AND si.item_id IN (SELECT id FROM items WHERE sale_id=?)")
             .bind(sid).first();
-          if (settled.n)
-            return J({ error: `${settled.n} item${settled.n === 1 ? "" : "s"} in this sale ` +
-              `${settled.n === 1 ? "is" : "are"} on a statement that has already been issued. ` +
-              `Void that statement first if it really needs to go.`, settled_items: settled.n }, 409);
+          if (settled.n) {
+            // A paid statement cannot be voided — that is deliberate, it records money that
+            // actually moved — so for those the honest answer is that this sale is not going
+            // anywhere, not "void it first", which would send the owner to a button that
+            // refuses them.
+            const one = settled.n === 1;
+            return J({ error: `${settled.n} item${one ? "" : "s"} in this sale ${one ? "is" : "are"} on a ` +
+              (settled.paid
+                ? `statement that has already been paid, so this sale has to stay. Anything that ` +
+                  `needs correcting goes on that dealer's next statement as an adjustment.`
+                : `statement that has already been issued. Void that statement first if this ` +
+                  `really needs to go.`),
+              settled_items: settled.n, paid_items: settled.paid || 0 }, 409);
+          }
           // R2 deletes are best-effort: a failed key must not leave the rows behind.
           await Promise.all(ps.map(x => env.PHOTOS.delete(x.r2_key).catch(() => {})));
           await db.prepare("DELETE FROM photos WHERE item_id IN (SELECT id FROM items WHERE sale_id=?)").bind(sid).run();
@@ -935,10 +946,12 @@ ${st.note ? `<p class="sub">${esc(st.note)}</p>` : ""}
               return J({
                 error: hit.length === 1
                   ? `${hit[0].n} of these items ${hit[0].n === 1 ? "is" : "are"} on ${hit[0].seller_name}'s ` +
-                    `${hit[0].status} statement for ${hit[0].period_start} to ${hit[0].period_end}. ` +
-                    `Voiding does not change that statement — deduct it on their next one.`
-                  : `These items are on ${hit.length} statements that have already been issued. ` +
-                    `Voiding does not change them — deduct the returns on the next statements.`,
+                    `${hit[0].status} statement for ${hit[0].period_start} to ${hit[0].period_end}, ` +
+                    `worth $${(hit[0].cents / 100).toFixed(2)}. Voiding here does not change that ` +
+                    `statement — take it off their next one as an adjustment.`
+                  : `These items are on ${hit.length} statements that have already gone out. ` +
+                    `Voiding here does not change them — take the returns off the next statements ` +
+                    `as adjustments.`,
                 statements: hit, needs_acknowledgement: true }, 409);
           }
           await db.prepare("UPDATE txns SET status='void', voided_at=?, void_reason=? WHERE id=?")

@@ -1121,6 +1121,10 @@ const netAmt = c => `<span style="font-weight:800;${c < 0 ? "color:var(--rust,#b
 // Three fields on one phone-width row. A column flex per field keeps each caption above its
 // own box; left to the sheet's default a caption sits beside its input and overlaps the next.
 const TERM_LBL = "flex:1;min-width:0;margin:0;font-size:.72rem;display:flex;flex-direction:column;gap:2px";
+// The adjustment row wants four controls and a phone has room for three. "What for" takes a
+// line of its own; the rest share the next one, with min-width:0 so the select shrinks instead
+// of pushing the Add button off the edge.
+const ADJ_LBL = "min-width:0;margin:0;font-size:.72rem;display:flex;flex-direction:column;gap:2px";
 
 async function renderStatements() {
   state.view = "statements"; state.saleId = null; state.detail = null; setChrome();
@@ -1194,9 +1198,22 @@ async function renderStatements() {
     });
   }
 
+  // Adjustments belong to the statement being built, and are thrown away if the dealer or the
+  // period changes underneath them — an adjustment is about a particular dealer's particular
+  // month, and carrying one across would put a stranger's correction on someone's payout.
+  let stAdj = [];
+  const adjKey = () => `${$("#stWho") && $("#stWho").value}|${$("#stFrom") && $("#stFrom").value}|${$("#stTo") && $("#stTo").value}`;
+  let stAdjKey = adjKey();
+  ["stWho", "stFrom", "stTo"].forEach(id => { const el = $("#" + id); if (el) el.onchange = () => {
+    if (adjKey() !== stAdjKey) { stAdj = []; stAdjKey = adjKey(); }
+    const o = $("#stOut"); if (o) o.innerHTML = "";
+  }; });
+
   const prev = $("#stPrev");
-  if (prev) prev.onclick = async () => {
-    const body = JSON.stringify({ seller_id: $("#stWho").value, from: $("#stFrom").value, to: $("#stTo").value });
+  const runPreview = async () => {
+    stAdjKey = adjKey();
+    const body = JSON.stringify({ seller_id: $("#stWho").value, from: $("#stFrom").value, to: $("#stTo").value,
+                                  adjustments: stAdj });
     const out = $("#stOut");
     out.innerHTML = `<div class="muted" style="font-size:.82rem;padding:10px 0">Working…</div>`;
     let p;
@@ -1206,22 +1223,54 @@ async function renderStatements() {
     // Preview and save go through the same server-side arithmetic, so what is shown here is
     // exactly what gets frozen. Nothing is stored until the button below is pressed.
     out.innerHTML = `<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
-        <div class="split"><span>${esc(p.seller.name)} · ${esc(p.from)} → ${esc(p.to)}</span><span class="muted" style="font-size:.82rem">${s.item_count} item${s.item_count === 1 ? "" : "s"}</span></div>
+        <div class="split"><span>${esc(p.seller.name)} · ${esc(periodShort(p.from, p.to))}</span><span class="muted" style="font-size:.82rem;white-space:nowrap">${s.item_count} item${s.item_count === 1 ? "" : "s"}</span></div>
         <div class="split"><span>Sold</span><span class="amt">${dollars(s.gross_cents)}</span></div>
         <div class="split"><span>Commission ${s.commission_pct}%</span><span class="amt">${dollars(-s.commission_cents)}</span></div>
         <div class="split"><span>Booth rent</span><span class="amt">${dollars(-s.rent_charged_cents)}</span></div>
+        ${stAdj.map((a, i) => `<div class="split"><span>${esc(a.label)}
+            <a href="#" data-rmadj="${i}" class="muted" style="font-size:.75rem;font-weight:700;margin-left:6px">remove</a></span>
+            <span class="amt">${dollars(a.cents)}</span></div>`).join("")}
         <div class="split" style="border-top:2px solid var(--ink,#111);margin-top:4px;padding-top:6px">
           <span style="font-weight:800">${s.owes ? "Dealer owes you" : "Dealer is owed"}</span><span class="amt">${netAmt(s.net_cents)}</span></div>
         ${s.item_count ? "" : `<div class="muted" style="font-size:.8rem;margin-top:6px">Nothing of theirs sold in this period. Saving still records the rent.</div>`}
+        <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:8px">
+          <label style="margin:0">Adjustment</label>
+          <div class="muted" style="font-size:.78rem;margin:2px 0 6px">A correction that belongs on this statement rather than in the item list — a return from last month, a damaged piece, a supply you covered for them. For something returned after they were paid for it, take off what <em>they</em> received, not the ticket price${s.commission_pct ? ` — ${100 - s.commission_pct}% of it, after your ${s.commission_pct}% commission` : ""}.</div>
+          <label style="${ADJ_LBL};margin-bottom:6px">What for<input type="text" id="adjLabel" maxlength="80" placeholder="e.g. crock returned"></label>
+          <div class="row" style="gap:6px;align-items:flex-end">
+            <label style="${ADJ_LBL};flex:1">Amount $<input type="number" id="adjAmt" min="0" step="0.01" inputmode="decimal"></label>
+            <label style="${ADJ_LBL};flex:1.4">Direction<select id="adjDir" style="width:100%"><option value="-1">Take off</option><option value="1">Pay extra</option></select></label>
+            <button class="btn sec sm" id="adjAdd" style="margin:0;flex:0 0 auto">Add</button>
+          </div>
+        </div>
         <div style="height:10px"></div>
         <button class="btn" id="stSave">Save as a draft statement</button>
       </div>`;
+    $("#adjAdd").onclick = () => {
+      const label = $("#adjLabel").value.trim();
+      const amt = Number($("#adjAmt").value);
+      if (!label) return toast("Say what the adjustment is for — it goes on the statement");
+      if (!(amt > 0)) return toast("Enter an amount");
+      // The direction is a separate choice rather than a minus sign in the amount box, because
+      // a typed minus is the easiest thing in this whole screen to get backwards, and getting
+      // it backwards pays a dealer twice instead of taking money back.
+      stAdj.push({ label, cents: Math.round(amt * 100) * Number($("#adjDir").value) });
+      runPreview();
+    };
+    $("#adjLabel").addEventListener("keydown", e => { if (e.key === "Enter") $("#adjAdd").click(); });
+    $("#adjAmt").addEventListener("keydown", e => { if (e.key === "Enter") $("#adjAdd").click(); });
+    out.querySelectorAll("[data-rmadj]").forEach(a => a.onclick = e => {
+      e.preventDefault();
+      stAdj.splice(Number(a.dataset.rmadj), 1);
+      runPreview();
+    });
     $("#stSave").onclick = async () => {
       $("#stSave").disabled = true;
       try { const r = await api("/me/statements", { method: "POST", body }); toast("Statement saved"); return renderStatement(r.statement_id); }
       catch (e) { $("#stSave").disabled = false; toast(e.message); }
     };
   };
+  if (prev) prev.onclick = runPreview;
 }
 
 // One statement, with the two things that make it a document: something to hand over
@@ -1267,7 +1316,11 @@ async function renderStatement(id) {
       <div style="height:8px"></div>
       ${next.map(t => `<button class="btn ${t === "void" ? "rust" : ""}" data-to="${t}" style="margin-top:6px">${NEXT_LABEL[t]}</button>`).join("")}
     </div>` : `<div class="muted" style="font-size:.82rem;margin-top:12px;text-align:center">${
-      st.status === "paid" ? "Paid and closed. Void it if it has to change." : "Voided."}</div>`}
+      st.status === "paid"
+        // Deliberately final. This dealer has been paid; letting the document be voided would
+        // erase the record of money that actually moved. A correction goes on the next one.
+        ? "Paid, and final — this is the record of a payment that happened. Anything that needs correcting goes on their next statement as an adjustment."
+        : "Voided."}</div>`}
     <div style="height:14px"></div>
     <button class="btn sec" id="stBack">← All payouts</button>
     <div style="height:20px"></div>`;
