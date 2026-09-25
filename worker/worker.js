@@ -606,6 +606,81 @@ export default {
             adjustments: (await db.prepare("SELECT * FROM statement_adjustments WHERE statement_id=? ORDER BY created_at").bind(st.id).all()).results });
         }
 
+        // The thing a dealer is actually handed. CSV because every dealer already has something
+        // that opens one, and a print view because a mall owner hands over paper.
+        if (parts.length === 5 && (parts[4] === "csv" || parts[4] === "print") && m === "GET") {
+          const st = await db.prepare(
+            "SELECT st.*, s.name AS seller_name, s.booth, s.payout_method FROM statements st " +
+            "JOIN sellers s ON s.id=st.seller_id WHERE st.id=? AND st.user_id=?").bind(parts[3], userId).first();
+          if (!st) return J({ error: "not found" }, 404);
+          const lines = (await db.prepare("SELECT * FROM statement_items WHERE statement_id=? ORDER BY sold_at, name").bind(st.id).all()).results;
+          const adj = (await db.prepare("SELECT * FROM statement_adjustments WHERE statement_id=? ORDER BY created_at").bind(st.id).all()).results;
+          const d = c => (c < 0 ? "-$" : "$") + (Math.abs(c) / 100).toFixed(2);
+          const owner = await db.prepare("SELECT shop_name FROM users WHERE id=?").bind(userId).first();
+          const who = (owner && owner.shop_name) || "";
+          const head = `${st.seller_name}${st.booth ? ` (booth ${st.booth})` : ""}`;
+          const period = `${st.period_start} to ${st.period_end}`;
+
+          if (parts[4] === "csv") {
+            // Excel decides a field is a formula if it starts with = + - or @, so a name like
+            // "-- spare parts" becomes #NAME? or worse. Prefixing a quote is the standard defusing
+            // and it survives the round trip back out.
+            const cell = v => {
+              let s = String(v ?? "");
+              if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+              return `"${s.replace(/"/g, '""')}"`;
+            };
+            const rows = [
+              ["Statement", st.id], ["Dealer", head], ["Period", period], ["Status", st.status], [],
+              ["Sold", "Item", "Price"],
+              ...lines.map(l => [l.sold_at || "", l.name, (l.price_cents / 100).toFixed(2)]),
+              [],
+              ["", "Gross", (st.gross_cents / 100).toFixed(2)],
+              ["", `Commission ${st.commission_pct}%`, (-st.commission_cents / 100).toFixed(2)],
+              ["", "Booth rent", (-st.rent_charged_cents / 100).toFixed(2)],
+              ...adj.map(a => ["", a.label, (a.cents / 100).toFixed(2)]),
+              ["", st.net_cents < 0 ? "OWES" : "Net due", (st.net_cents / 100).toFixed(2)],
+            ];
+            return new Response(rows.map(r => r.map(cell).join(",")).join("\r\n"), { headers: {
+              "content-type": "text/csv; charset=utf-8",
+              "content-disposition": `attachment; filename="statement-${st.period_start}-${String(st.seller_name).replace(/[^\w-]+/g, "_")}.csv"`,
+              "cache-control": "no-store" } });
+          }
+
+          const row = (label, cents, cls = "") =>
+            `<tr class="${cls}"><td>${esc(label)}</td><td class="n">${esc(d(cents))}</td></tr>`;
+          return H(`<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Statement ${esc(period)} — ${esc(head)}</title>
+<style>
+ body{font:15px/1.5 system-ui,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;color:#111}
+ h1{font-size:1.25rem;margin:0 0 2px} .sub{color:#666;margin:0 0 18px}
+ table{width:100%;border-collapse:collapse;margin:14px 0}
+ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #eee}
+ .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+ .tot td{border-top:2px solid #111;border-bottom:none;font-weight:700;font-size:1.05rem}
+ .owed td{color:#b00}
+ .st{display:inline-block;padding:1px 8px;border:1px solid #bbb;border-radius:99px;font-size:.78rem;color:#555}
+ @media print{body{margin:0}.noprint{display:none}}
+</style>
+<h1>${esc(who || "Settlement statement")}</h1>
+<p class="sub">${esc(head)} · ${esc(period)} · <span class="st">${esc(st.status)}</span></p>
+<table><thead><tr><th>Sold</th><th>Item</th><th class="n">Price</th></tr></thead><tbody>
+${lines.map(l => `<tr><td>${esc(String(l.sold_at || "").slice(0, 10))}</td><td>${esc(l.name)}</td><td class="n">${esc(d(l.price_cents))}</td></tr>`).join("")
+  || `<tr><td colspan="3">No items sold in this period.</td></tr>`}
+</tbody></table>
+<table><tbody>
+${row("Gross", st.gross_cents)}
+${row(`Commission ${st.commission_pct}%`, -st.commission_cents)}
+${row("Booth rent", -st.rent_charged_cents)}
+${adj.map(a => row(a.label, a.cents)).join("")}
+${row(st.net_cents < 0 ? "Owes" : "Net due", st.net_cents, st.net_cents < 0 ? "tot owed" : "tot")}
+</tbody></table>
+${st.payout_method ? `<p class="sub">Paid by ${esc(st.payout_method)}.</p>` : ""}
+${st.note ? `<p class="sub">${esc(st.note)}</p>` : ""}
+<p class="sub noprint"><a href="/api/me/statements/${esc(st.id)}/csv">Download CSV</a></p>`, 200, "no-store");
+        }
+
         if (parts.length === 5 && parts[4] === "status" && m === "POST") {
           const st = await db.prepare("SELECT * FROM statements WHERE id=? AND user_id=?").bind(parts[3], userId).first();
           if (!st) return J({ error: "not found" }, 404);
@@ -684,6 +759,20 @@ export default {
             return J({ error: "This sale has recorded sales", sold: sold.n, needs_force: true }, 409);
           const ps = (await db.prepare(
             "SELECT p.r2_key FROM photos p JOIN items i ON i.id=p.item_id WHERE i.sale_id=?").bind(sid).all()).results;
+          // Nothing below can be undone, and a statement is a promise about money. If any item in
+          // this sale has been settled on a statement that was issued or paid, deleting the sale
+          // pulls the evidence out from under a document a dealer is holding. statement_items
+          // keeps its own copy of the line, so the figures would survive - but the items behind
+          // them would not, and "where did the March sale go" is not a question to answer after
+          // the fact. Drafts do not block: nothing has been handed over yet.
+          const settled = await db.prepare(
+            "SELECT COUNT(*) AS n FROM statement_items si JOIN statements st ON st.id=si.statement_id " +
+            "WHERE st.status IN ('issued','paid') AND si.item_id IN (SELECT id FROM items WHERE sale_id=?)")
+            .bind(sid).first();
+          if (settled.n)
+            return J({ error: `${settled.n} item${settled.n === 1 ? "" : "s"} in this sale ` +
+              `${settled.n === 1 ? "is" : "are"} on a statement that has already been issued. ` +
+              `Void that statement first if it really needs to go.`, settled_items: settled.n }, 409);
           // R2 deletes are best-effort: a failed key must not leave the rows behind.
           await Promise.all(ps.map(x => env.PHOTOS.delete(x.r2_key).catch(() => {})));
           await db.prepare("DELETE FROM photos WHERE item_id IN (SELECT id FROM items WHERE sale_id=?)").bind(sid).run();
