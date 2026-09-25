@@ -1413,6 +1413,31 @@ export function photosLookHeic(photos) {
   return (photos || []).some(p => /\.hei[cf](\?|#|$)/i.test(String(p && p.url || "")));
 }
 
+// Should this run refuse to produce a price at all? Returns the sentence to show the dealer, or
+// null to carry on. A rule about whether an answer is worth giving, so it is decided here, away
+// from the network, and tested as a rule.
+//
+// Photos supplied and not one of them readable means every figure downstream would come from the
+// dealer's own sentence. That is not an appraisal; it is their guess with a dollar sign on it, and
+// it cost them an estimate. Partial failure still prices - less evidence is not no evidence.
+//
+// No photos at all is NOT a refusal. The API has always allowed a description-only run and the
+// dealer is not being told anything they did not choose; it warns instead.
+export function blindRunError(photos, findings) {
+  const n = (photos || []).length;
+  if (!n) return null;
+  if (!(findings || []).length || !findings.every(f => f && f.error)) return null;
+  // The cause is usually knowable, and the HEIC one a dealer can fix themselves in two taps.
+  return photosLookHeic(photos)
+    ? `Your photos are in Apple's HEIC format and the appraiser cannot read them, so it has ` +
+      `nothing to go on but your description — which is not enough to price something. ` +
+      `On iPhone: Settings > Camera > Formats > Most Compatible, then photograph the item ` +
+      `again and retry. Your estimate has not been used.`
+    : `The appraiser could not read any of your ${n} photo${n === 1 ? "" : "s"}, so it has nothing ` +
+      `to go on but your description — which is not enough to price something. Retry, or replace ` +
+      `the photos if they are very dark, blurred or unusual. Your estimate has not been used.`;
+}
+
 // ---------- the pipeline ----------
 export async function appraise(env, req) {
   const c = cfg(env);
@@ -1426,18 +1451,25 @@ export async function appraise(env, req) {
   // are bypassed (an older cached app.js, a direct API call, a browser that decodes HEIC for the
   // canvas but writes it back out unchanged) this is where it lands.
   //
-  // The generic sentence was already here and it fired correctly on the measured HEIC run. It was
-  // still no use: it names a symptom the dealer cannot act on, while the card above it shows an
-  // identification invented from their own sentence. When every photo failed and the photos are
-  // HEIC, the cause is known, so say it and say what fixes it.
-  if (findings.every(f => f.error)) {
-    const heic = photosLookHeic(req.photos);
-    warnings.push(heic
-      ? `the photos are in Apple's HEIC format and the appraiser cannot read them, so NOTHING ` +
-        `below comes from the pictures - it is all inferred from your description. On iPhone: ` +
-        `Settings > Camera > Formats > Most Compatible, then photograph the item again.`
-      : "vision model failed on every photo; appraisal relies on dealer text only");
-  }
+  // A warning was not enough. Measured on 2026-09-24: every photo failed, and the run still
+  // returned "256 gb total" as the identification and $920-1520 as the price, off the dealer's
+  // sentence alone, having charged them an estimate for it. The warning was true and sat under a
+  // four-figure headline, which is not the same as refusing. A number nobody could check is worth
+  // less than no number, and it costs a credit and invites a dealer to price a real thing by it.
+  //
+  // So when photos were supplied and the appraiser could not read a single one, this run does not
+  // produce a price. Throwing is what the caller already handles correctly: the appraisal is
+  // marked error, the message below is shown to the dealer verbatim above a "Try again" button,
+  // and the estimate is refunded. That is the whole fix - the machinery was already there.
+  //
+  // Partial failure is different and still prices: three photos read and one refused is less
+  // evidence, not no evidence, and the surviving findings are real.
+  const blind = blindRunError(req.photos, findings);
+  if (blind) throw new Error(blind);
+  // No photos at all is a different thing from photos that could not be read, and the old line
+  // said the vision model had failed even when it was never given anything — [].every() is true.
+  if (!(req.photos || []).length)
+    warnings.push("no photos were supplied, so everything below is inferred from your description alone");
 
   // Give the reasoner today's metal prices up front so its own number starts from reality.
   const spot = await metalPrices();

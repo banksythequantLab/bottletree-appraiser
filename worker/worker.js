@@ -123,7 +123,10 @@ async function runAppraisal(env, appraisalId, item, photos) {
     // a failed run must not cost the dealer an estimate
     const ap = await db.prepare("SELECT funded_by FROM appraisals WHERE id=?").bind(appraisalId).first();
     const owner = await db.prepare("SELECT s.user_id FROM items i JOIN sales s ON s.id=i.sale_id WHERE i.id=?").bind(item.id).first();
-    if (ap?.funded_by && owner?.user_id) await refundEstimate(db, owner.user_id, ap.funded_by, "appraisal failed");
+    // The reason is kept verbatim in the ledger. "appraisal failed" for everything made the
+    // unreadable-photo refusals indistinguishable from a model outage when reconciling later.
+    if (ap?.funded_by && owner?.user_id)
+      await refundEstimate(db, owner.user_id, ap.funded_by, String(e && e.message || e).slice(0, 300));
   }
 }
 
