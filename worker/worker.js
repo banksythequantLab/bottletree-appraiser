@@ -2,6 +2,7 @@
 // Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
 import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent } from "./billing.js";
 import { appraise } from "./appraiser.js";
+import { settle, periodError, canTransition } from "./settlements.js";
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const enc = new TextEncoder();
@@ -460,7 +461,11 @@ export default {
       // ---------- sellers (account-wide: the dealer's consignors, not one sale's) ----------
       if (parts[1] === "me" && parts[2] === "sellers") {
         if (parts.length === 3 && m === "GET")
-          return J((await db.prepare("SELECT id,name,created_at FROM sellers WHERE user_id=? ORDER BY name COLLATE NOCASE").bind(userId).all()).results);
+          // The settlement terms come back with the dealer. A list that omitted them would make
+          // the page fetch every seller twice to show a commission it already had.
+          return J((await db.prepare(
+            "SELECT id,name,created_at,commission_pct,rent_cents,booth,terms_note,active,payout_method " +
+            "FROM sellers WHERE user_id=? ORDER BY name COLLATE NOCASE").bind(userId).all()).results);
         if (parts.length === 3 && m === "POST") {
           const b = await readJson(request); const name = (b.name || "").trim();
           if (!name) return J({ error: "name required" }, 400);
@@ -482,6 +487,29 @@ export default {
             await db.prepare("UPDATE sellers SET name=? WHERE id=?").bind(name, sid2).run();
             return J({ id: sid2, name });
           }
+          // Settlement terms. Separate from PUT, which renames, because renaming a dealer and
+          // changing what they are paid are different acts and one should not quietly do the other.
+          if (m === "PATCH") {
+            const b = await readJson(request);
+            // The typo that matters here is 1200 for 12%. Out of range is always a mistake, and
+            // a mistake in this field is money.
+            if (b.commission_pct !== undefined) {
+              const p = Number(b.commission_pct);
+              if (!(p >= 0 && p <= 100)) return J({ error: "Commission must be between 0 and 100 percent" }, 400);
+            }
+            if (b.rent_cents !== undefined && !(Number(b.rent_cents) >= 0))
+              return J({ error: "Rent cannot be negative" }, 400);
+            await db.prepare(
+              "UPDATE sellers SET commission_pct=COALESCE(?,commission_pct), rent_cents=COALESCE(?,rent_cents), " +
+              "booth=COALESCE(?,booth), terms_note=COALESCE(?,terms_note), active=COALESCE(?,active), " +
+              "payout_method=COALESCE(?,payout_method) WHERE id=?")
+              .bind(b.commission_pct ?? null, b.rent_cents === undefined ? null : Math.round(Number(b.rent_cents)),
+                    b.booth ?? null, b.terms_note ?? null,
+                    b.active === undefined ? null : (b.active ? 1 : 0), b.payout_method ?? null, sid2).run();
+            return J(await db.prepare(
+              "SELECT id,name,commission_pct,rent_cents,booth,terms_note,active,payout_method FROM sellers WHERE id=?")
+              .bind(sid2).first());
+          }
           if (m === "DELETE") {
             // Items keep their history; they just lose the attribution. Never delete a seller's items.
             const n = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE seller_id=?").bind(sid2).first();
@@ -491,6 +519,107 @@ export default {
             await db.prepare("DELETE FROM sellers WHERE id=?").bind(sid2).run();
             return J({ deleted: 1, unassigned: n.n });
           }
+        }
+        return J({ error: "not found" }, 404);
+      }
+
+      // ---------- settlements: what each dealer is owed, and a frozen record of it ----------
+      // The arithmetic lives in settlements.js and is tested without a database. What is here is
+      // the querying, the freezing, and refusing the things that have to be refused.
+      if (parts[1] === "me" && parts[2] === "statements") {
+        // Shared by preview and create so the two can never disagree about the numbers. A preview
+        // that differs from what gets saved is worse than no preview.
+        const settleFor = async (b) => {
+          const from = String(b.from || ""), to = String(b.to || "");
+          const bad = periodError(from, to);
+          if (bad) return { error: bad, status: 400 };
+          const seller = await db.prepare("SELECT * FROM sellers WHERE id=? AND user_id=?")
+            .bind(String(b.seller_id || ""), userId).first();
+          if (!seller) return { error: "Dealer not found", status: 404 };
+          // This dealer's sold items, in the period, from this account's sales only. The join on
+          // sales is what stops another account's item ever reaching a statement.
+          const items = (await db.prepare(
+            "SELECT i.id, i.name, i.price_cents, i.sold_at FROM items i " +
+            "JOIN sales sa ON sa.id = i.sale_id " +
+            "WHERE i.seller_id=? AND sa.user_id=? AND i.status='sold' " +
+            "AND i.sold_at IS NOT NULL AND i.sold_at >= ? AND i.sold_at <= ? " +
+            "ORDER BY i.sold_at, i.name")
+            .bind(seller.id, userId, from, to + "￿").all()).results;
+          // Terms are read ONCE, here. Everything downstream uses this copy and nothing reads
+          // sellers.commission_pct again, which is what stops a later rate change rewriting a
+          // statement that has already been handed to someone.
+          const settled = settle({ items, commission_pct: seller.commission_pct,
+                                   rent_cents: seller.rent_cents, adjustments: b.adjustments || [] });
+          return { seller: { id: seller.id, name: seller.name, booth: seller.booth }, from, to, settled };
+        };
+
+        if (parts.length === 3 && m === "GET") {
+          return J({ statements: (await db.prepare(
+            "SELECT st.*, s.name AS seller_name, s.booth FROM statements st " +
+            "JOIN sellers s ON s.id=st.seller_id WHERE st.user_id=? " +
+            "ORDER BY st.period_start DESC, s.name COLLATE NOCASE").bind(userId).all()).results });
+        }
+
+        // The numbers, saved nowhere. This is what the owner looks at before committing.
+        if (parts.length === 4 && parts[3] === "preview" && m === "POST") {
+          const built = await settleFor(await readJson(request));
+          return built.error ? J({ error: built.error }, built.status) : J(built);
+        }
+
+        if (parts.length === 3 && m === "POST") {
+          const b = await readJson(request);
+          const built = await settleFor(b);
+          if (built.error) return J({ error: built.error }, built.status);
+          // The partial unique index enforces this in the database too. It is here so the answer
+          // is a sentence rather than a constraint error.
+          const clash = await db.prepare(
+            "SELECT id FROM statements WHERE seller_id=? AND period_start=? AND period_end=? AND status<>'void'")
+            .bind(b.seller_id, built.from, built.to).first();
+          if (clash) return J({ error: "A statement for this dealer and period already exists",
+                                statement_id: clash.id }, 409);
+          const id = uid(), ts = now(), s = built.settled;
+          await db.prepare(
+            "INSERT INTO statements (id,user_id,seller_id,period_start,period_end,basis,commission_pct,rent_cents," +
+            "gross_cents,commission_cents,rent_charged_cents,adjust_cents,net_cents,item_count,status,note,created_at) " +
+            "VALUES (?,?,?,?,?,'sold_at',?,?,?,?,?,?,?,?,'draft',?,?)")
+            .bind(id, userId, b.seller_id, built.from, built.to, s.commission_pct, s.rent_cents,
+                  s.gross_cents, s.commission_cents, s.rent_charged_cents, s.adjust_cents, s.net_cents,
+                  s.item_count, b.note ?? null, ts).run();
+          // The lines are copied, not joined. From here the statement does not care whether the
+          // items are renamed, repriced, reassigned to another dealer or deleted outright.
+          for (const l of s.lines)
+            await db.prepare("INSERT INTO statement_items (id,statement_id,item_id,name,price_cents,sold_at) VALUES (?,?,?,?,?,?)")
+              .bind(uid(), id, l.item_id, l.name, l.price_cents, l.sold_at).run();
+          for (const a of (b.adjustments || []))
+            await db.prepare("INSERT INTO statement_adjustments (id,statement_id,label,cents,created_at) VALUES (?,?,?,?,?)")
+              .bind(uid(), id, String(a.label || "adjustment").slice(0, 80), Math.round(Number(a.cents) || 0), ts).run();
+          return J({ statement_id: id, ...s }, 201);
+        }
+
+        if (parts.length === 4 && m === "GET") {
+          const st = await db.prepare(
+            "SELECT st.*, s.name AS seller_name, s.booth, s.payout_method FROM statements st " +
+            "JOIN sellers s ON s.id=st.seller_id WHERE st.id=? AND st.user_id=?").bind(parts[3], userId).first();
+          if (!st) return J({ error: "not found" }, 404);
+          return J({ ...st, owes: st.net_cents < 0,
+            items: (await db.prepare("SELECT * FROM statement_items WHERE statement_id=? ORDER BY sold_at, name").bind(st.id).all()).results,
+            adjustments: (await db.prepare("SELECT * FROM statement_adjustments WHERE statement_id=? ORDER BY created_at").bind(st.id).all()).results });
+        }
+
+        if (parts.length === 5 && parts[4] === "status" && m === "POST") {
+          const st = await db.prepare("SELECT * FROM statements WHERE id=? AND user_id=?").bind(parts[3], userId).first();
+          if (!st) return J({ error: "not found" }, 404);
+          const to = String((await readJson(request)).to || "");
+          if (!canTransition(st.status, to))
+            return J({ error: st.status === "paid"
+              ? "A paid statement cannot be changed — void it and issue a new one"
+              : `Cannot go from ${st.status} to ${to || "nothing"}` }, 409);
+          const ts = now();
+          await db.prepare(
+            "UPDATE statements SET status=?, issued_at=CASE WHEN ?='issued' THEN ? ELSE issued_at END, " +
+            "paid_at=CASE WHEN ?='paid' THEN ? ELSE paid_at END WHERE id=?")
+            .bind(to, to, ts, to, ts, st.id).run();
+          return J({ id: st.id, status: to });
         }
         return J({ error: "not found" }, 404);
       }
