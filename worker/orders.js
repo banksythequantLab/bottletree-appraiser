@@ -20,6 +20,29 @@ export function stripeReady(env) {
   return !!(env && env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET);
 }
 
+// Whose Stripe account gets paid for THIS shop's online sales.
+//
+// The app is given away to garage-sale and small-shop owners, and every storefront used to
+// check out through the platform's single Stripe key. That is correct only while the shop
+// belongs to whoever owns the key. For anyone else it would put their customers' money in
+// the platform's balance, their chargebacks on the platform's account, and goods the
+// platform never sold on its tax reporting — which is the arrangement Stripe Connect exists
+// to handle and generally forbids doing any other way.
+//
+// So a shop may take card payments only when it is paid into the platform's own account,
+// and that is only true of the platform owner's own shops. Everyone else keeps the
+// catalogue — items, photos, prices, AI descriptions — and is told to contact the shop.
+// users.stripe_account_id is NULL by default, so this is off for every account until set.
+//
+// When Connect is built, an id that differs from the platform's stops being a refusal and
+// becomes a Stripe-Account header on the session. The column already holds the right thing.
+export function shopCanSellOnline(env, shop) {
+  if (!stripeReady(env)) return false;
+  const platform = (env && env.STRIPE_PLATFORM_ACCOUNT) || "";
+  const acct = (shop && shop.stripe_account_id) || "";
+  return !!platform && !!acct && acct === platform;
+}
+
 // A completed session is only money when Stripe says the payment is settled. 'no_payment_required'
 // is a zero-value session, which our checkout refuses upstream, but if one ever arrives it is
 // settled by definition and must not be left hanging.

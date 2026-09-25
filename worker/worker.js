@@ -3,7 +3,7 @@
 import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent, welcomeGrant } from "./billing.js";
 import { appraise } from "./appraiser.js";
 import { settle, periodError, canTransition } from "./settlements.js";
-import { webhookAction, fulfilResult, needsAttention, stripeReady } from "./orders.js";
+import { webhookAction, fulfilResult, needsAttention, stripeReady, shopCanSellOnline } from "./orders.js";
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const enc = new TextEncoder();
@@ -232,7 +232,8 @@ async function renderShop(db, slug) {
 }
 
 async function renderItem(db, env, slug, itemId, paid) {
-  const shop = await db.prepare("SELECT id, shop_slug, shop_name, shop_blurb FROM users WHERE shop_slug=?").bind(slug).first();
+  // stripe_account_id comes along because it decides whether this shop gets a Buy button.
+  const shop = await db.prepare("SELECT id, shop_slug, shop_name, shop_blurb, stripe_account_id FROM users WHERE shop_slug=?").bind(slug).first();
   if (!shop) return H("<h1>Shop not found</h1>", 404, "no-store");
   const b = await itemBundle(db, itemId);
   if (!b || b.item.listing_status === "draft") return H(shopPage(shop, "Not found", `<div class="empty">Item not found.</div>`), 404, "no-store");
@@ -242,9 +243,9 @@ async function renderItem(db, env, slug, itemId, paid) {
   const main = firstPhoto(photos);
   const gallery = photos.length ? `<div class="gal"><img id="mainImg" src="${esc(main.url)}" alt=""><div class="thumbs">${photos.map(p => `<img src="${esc(p.url)}" alt="${esc(p.kind)}" onclick="document.getElementById('mainImg').src=this.src">`).join("")}</div></div>` : `<div class="gal"></div>`;
   const pills = [ident.maker, ident.period, ident.origin, appraisal?.result?.listing?.condition_grade].filter(Boolean).map(x => `<span class="pill">${esc(x)}</span>`).join("");
-  // The same readiness test as the endpoint, so a shopper is never shown a Buy button that
-  // answers 503 — or worse, one that charges them with nothing listening for the receipt.
-  const buy = sold ? `<div class="meta"><b>Sold</b></div>` : (stripeReady(env)
+  // The same test as the endpoint, so a shopper is never shown a Buy button that answers 503
+  // — or worse, one that charges them into the wrong person's Stripe account.
+  const buy = sold ? `<div class="meta"><b>Sold</b></div>` : (shopCanSellOnline(env, shop)
     ? `<form method="post" action="/api/public/checkout"><input type="hidden" name="item_id" value="${item.id}"><button class="btn">Buy now — ${money(item.price_cents)}</button></form>`
     : `<div class="meta">Contact the shop to purchase.</div>`);
   const body = `<div class="item">${gallery}<div>${paid ? `<div class="ok">Thank you — your payment went through.</div>` : ""}
@@ -292,8 +293,14 @@ export default {
           if (!stripeReady(env)) return J({ error: "online checkout not enabled" }, 503);
           const ct = request.headers.get("content-type") || "";
           const itemId = ct.includes("json") ? (await readJson(request)).item_id : (await request.formData()).get("item_id");
-          const row = await db.prepare("SELECT i.*, u.shop_slug, u.shop_name FROM items i JOIN sales s ON s.id=i.sale_id JOIN users u ON u.id=s.user_id WHERE i.id=? AND i.listing_status='live' AND i.status='available'").bind(itemId).first();
+          const row = await db.prepare("SELECT i.*, u.shop_slug, u.shop_name, u.stripe_account_id FROM items i JOIN sales s ON s.id=i.sale_id JOIN users u ON u.id=s.user_id WHERE i.id=? AND i.listing_status='live' AND i.status='available'").bind(itemId).first();
           if (!row) return J({ error: "item unavailable" }, 404);
+          // Hiding the button is presentation; this is the control. A shop that is not paid
+          // into the platform's own Stripe account cannot take a card payment here, however
+          // the request was constructed, because the money would land in the wrong hands.
+          if (!shopCanSellOnline(env, row))
+            return J({ error: "This shop takes payment directly, not through the site. " +
+                              "Contact the shop to buy this item.", online_checkout: false }, 503);
           if (row.price_cents < 50) return J({ error: "price too low for card checkout" }, 400);
           const ph = await db.prepare("SELECT r2_key FROM photos WHERE item_id=? ORDER BY sort, created_at LIMIT 1").bind(row.id).first();
           const origin = env.PUBLIC_ORIGIN || url.origin;

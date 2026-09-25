@@ -46,7 +46,13 @@
     "RC_WEB_LINK": "https://pay.rev.cat/ukvqowwbpdfmdjjz",
     // eBay hashes this exact string into the challenge response, so it must match what is
     // registered with eBay character for character — no trailing slash, no http.
-    "EBAY_DELETION_URL": "https://bottletree-app.dj-b02.workers.dev/api/ebay/deletion"
+    "EBAY_DELETION_URL": "https://bottletree-app.dj-b02.workers.dev/api/ebay/deletion",
+    // The Stripe account STRIPE_SECRET_KEY belongs to. Not a secret — it is in every dashboard
+    // URL — but it is the whole access control on online checkout: a shop may take card
+    // payments only when users.stripe_account_id equals this, which is to say only when the
+    // money is going to the account that owns the key. Every other shop keeps the catalogue
+    // and tells buyers to contact them. See orders.js shopCanSellOnline().
+    "STRIPE_PLATFORM_ACCOUNT": "acct_1RZvItErbZFpxnC1"
   }
   // Secrets (wrangler secret put): APPRAISER_TOKEN (Nebius endpoint bearer), APPRAISER_SERVICE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
 }
