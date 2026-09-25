@@ -20,7 +20,11 @@
  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.4);
 }}
 *{box-sizing:border-box}
-html,body{margin:0;height:100%}
+/* body must GROW with the page, not be pinned to the viewport. With height:100% its box ended
+   at 100vh, so the padding-bottom below that reserves room for the fixed tab bar sat at the
+   fold instead of after the content, and everything past one screen ran under the bar. */
+html{margin:0;height:100%}
+body{margin:0;min-height:100%}
 body{background:var(--bg);color:var(--ink);font-family:"Nunito Sans",-apple-system,system-ui,sans-serif;line-height:1.45;-webkit-font-smoothing:antialiased;padding-bottom:calc(28px + env(safe-area-inset-bottom))}
 /* The tab bar and the cashier bar are fixed, so the page has to reserve their height or the last
    rows sit underneath them and cannot be reached. The cashier bar stacks above the tab bar. */
@@ -113,7 +117,7 @@ ul.ev{margin:4px 0 0;padding-left:18px;font-size:.88rem}ul.ev li{margin:3px 0}
 </nav>
 <div class="toast" id="toast"></div>
 <script src="/rc-sdk.js?v=0.4"></script>
-<script src="/billing.js?v=0.5"></script>
-<script src="/app.js?v=0.5"></script>
+<script src="/billing.js?v=0.6"></script>
+<script src="/app.js?v=0.7"></script>
 </body>
 </html>

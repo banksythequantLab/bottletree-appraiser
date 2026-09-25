@@ -2,6 +2,7 @@
 // Runs first for /api/*, /p/* (photos) and /shop/* (public storefront); everything else is static assets.
 import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent } from "./billing.js";
 import { appraise } from "./appraiser.js";
+import { webhookAction, fulfilResult, needsAttention } from "./orders.js";
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const enc = new TextEncoder();
@@ -161,15 +162,29 @@ async function verifyStripeSig(env, rawBody, sigHeader) {
   const expected = await hmacHex(env.STRIPE_WEBHOOK_SECRET, `${parts.t}.${rawBody}`);
   return timingEq(expected, parts.v1);
 }
-async function markSoldOnline(db, itemId, sessionId, email) {
-  const item = await db.prepare("SELECT * FROM items WHERE id=? AND status='available'").bind(itemId).first();
-  if (!item) return false;
-  const txnId = uid();
-  await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)")
-    .bind(txnId, item.sale_id, item.price_cents, 1, "stripe", now()).run();
-  await db.prepare("UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status='hidden' WHERE id=?").bind(txnId, now(), itemId).run();
-  await db.prepare("UPDATE orders SET status='paid', paid_at=?, buyer_email=? WHERE stripe_session_id=?").bind(now(), email || null, sessionId).run();
-  return true;
+// The payment has settled. Sell the item if it is still there — and if it is not, say so on the
+// order instead of failing quietly, because the buyer has paid either way.
+async function markSoldOnline(db, itemId, sessionId, email, paymentIntent) {
+  // Stripe retries a webhook until it gets a 2xx, and sends completed and
+  // async_payment_succeeded for the same session. Without this, the second delivery would find
+  // the item no longer available — because this very order sold it — and tell the owner to
+  // refund a perfectly good sale. Settling is done once per session.
+  const existing = await db.prepare("SELECT status FROM orders WHERE stripe_session_id=?").bind(sessionId).first();
+  if (existing && existing.status !== "pending")
+    return { status: existing.status, note: null, sold: existing.status === "paid", already: true };
+  const item = itemId ? await db.prepare("SELECT * FROM items WHERE id=? AND status='available'").bind(itemId).first() : null;
+  const out = fulfilResult(!!item);
+  if (item) {
+    const txnId = uid();
+    await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)")
+      .bind(txnId, item.sale_id, item.price_cents, 1, "stripe", now()).run();
+    await db.prepare("UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status='hidden' WHERE id=?").bind(txnId, now(), itemId).run();
+  }
+  // paid_at records when the money settled, whether or not there was anything left to send.
+  await db.prepare("UPDATE orders SET status=?, note=?, paid_at=?, updated_at=?, buyer_email=COALESCE(?,buyer_email), " +
+    "payment_intent=COALESCE(?,payment_intent) WHERE stripe_session_id=?")
+    .bind(out.status, out.note, now(), now(), email || null, paymentIntent || null, sessionId).run();
+  return out;
 }
 
 // ---------- public storefront (server-rendered) ----------
@@ -283,11 +298,25 @@ export default {
           const raw = await request.text();
           if (!env.STRIPE_WEBHOOK_SECRET || !(await verifyStripeSig(env, raw, request.headers.get("stripe-signature")))) return J({ error: "bad signature" }, 400);
           const ev = JSON.parse(raw);
-          if (ev.type === "checkout.session.completed") {
-            const s = ev.data.object;
-            await markSoldOnline(db, s.metadata?.item_id, s.id, s.customer_details?.email);
+          // What the event means is decided in orders.js, away from the database, because the
+          // rules are about money and deserve to be tested as rules. In particular a completed
+          // session is not necessarily a paid one: ACH and vouchers complete first and confirm
+          // later, and selling the item on completion alone takes it off the shelf for a
+          // payment that may never arrive.
+          const act = webhookAction(ev);
+          if (act.do === "fulfil" && act.session_id)
+            return J({ received: true, ...(await markSoldOnline(db, act.item_id, act.session_id, act.email, act.payment_intent)) });
+          if (act.do === "cancel" && act.session_id) {
+            // Only a live order can be cancelled. One that already settled must never be
+            // reopened by a late or duplicated event.
+            await db.prepare("UPDATE orders SET status='cancelled', note=?, updated_at=? WHERE stripe_session_id=? AND status='pending'")
+              .bind(act.reason || null, now(), act.session_id).run();
+            return J({ received: true, cancelled: true });
           }
-          return J({ received: true });
+          if (act.do === "wait" && act.session_id)
+            await db.prepare("UPDATE orders SET note=?, updated_at=? WHERE stripe_session_id=? AND status='pending'")
+              .bind(act.reason || null, now(), act.session_id).run();
+          return J({ received: true, action: act.do });
         }
         return J({ error: "not found" }, 404);
       }
@@ -495,6 +524,42 @@ export default {
         return J({ error: "not found" }, 404);
       }
 
+      // ---------- orders: what the online store sold, and what still has to be sent ----------
+      // These rows existed from the first day of the storefront and nothing ever read them.
+      if (parts[1] === "me" && parts[2] === "orders") {
+        if (parts.length === 3 && m === "GET") {
+          // The join through items and sales is what scopes these to this shop. An order has no
+          // user_id of its own; the item it is for is what makes it yours.
+          const rows = (await db.prepare(
+            "SELECT o.*, i.name AS item_name, i.ai_title, i.status AS item_status " +
+            "FROM orders o JOIN items i ON i.id=o.item_id JOIN sales s ON s.id=i.sale_id " +
+            "WHERE s.user_id=? ORDER BY o.created_at DESC LIMIT 200").bind(userId).all()).results;
+          return J({ orders: rows.map(o => ({ ...o, needs_attention: needsAttention(o) })) });
+        }
+        // Marking an order sent, and taking that back — a tracking number typed against the
+        // wrong row is a mistake worth being able to undo.
+        if (parts.length === 5 && parts[4] === "sent" && (m === "POST" || m === "DELETE")) {
+          const o = await db.prepare(
+            "SELECT o.* FROM orders o JOIN items i ON i.id=o.item_id JOIN sales s ON s.id=i.sale_id " +
+            "WHERE o.id=? AND s.user_id=?").bind(parts[3], userId).first();
+          if (!o) return J({ error: "not found" }, 404);
+          if (m === "DELETE") {
+            await db.prepare("UPDATE orders SET fulfilled_at=NULL, updated_at=? WHERE id=?").bind(now(), o.id).run();
+            return J({ id: o.id, fulfilled_at: null });
+          }
+          // Only something that was actually paid for can be sent. Marking a pending or
+          // cancelled order as sent would put a lie in the only record of it.
+          if (o.status !== "paid")
+            return J({ error: o.status === "needs_refund"
+              ? "This buyer paid for something that had already sold. Refund them in Stripe rather than marking it sent."
+              : `This order is ${o.status}, so there is nothing to send yet.`, status: o.status }, 409);
+          const ts = now();
+          await db.prepare("UPDATE orders SET fulfilled_at=?, updated_at=? WHERE id=?").bind(ts, ts, o.id).run();
+          return J({ id: o.id, fulfilled_at: ts });
+        }
+        return J({ error: "not found" }, 404);
+      }
+
       // ---------- device key (for the counter kiosk) ----------
       if (parts[1] === "me" && parts[2] === "device-key") {
         if (m === "GET") { const u = await db.prepare("SELECT device_key FROM users WHERE id=?").bind(userId).first(); return J({ device_key: u.device_key || null }); }
@@ -521,7 +586,7 @@ export default {
         if (m === "GET") {
           const { results } = await db.prepare(
             "SELECT s.*, (SELECT COUNT(*) FROM items i WHERE i.sale_id=s.id) AS items, " +
-            "(SELECT COALESCE(SUM(total_cents),0) FROM txns t WHERE t.sale_id=s.id) AS revenue_cents " +
+            "(SELECT COALESCE(SUM(total_cents),0) FROM txns t WHERE t.sale_id=s.id AND t.status='complete') AS revenue_cents " +
             "FROM sales s WHERE s.user_id=? ORDER BY created_at DESC").bind(userId).all();
           return J(results);
         }
@@ -550,11 +615,25 @@ export default {
         }
         if (parts.length === 3 && m === "DELETE") {
           // A sale with recorded sales is the dealer's books — refuse unless they say so explicitly.
-          const sold = await db.prepare("SELECT COUNT(*) AS n FROM txns WHERE sale_id=?").bind(sid).first();
+          // A voided transaction is not takings, so it must not be what makes deleting a sale
+          // feel dangerous — otherwise every corrected mistake leaves a permanent scary warning.
+          const sold = await db.prepare("SELECT COUNT(*) AS n FROM txns WHERE sale_id=? AND status='complete'").bind(sid).first();
           if (sold.n && url.searchParams.get("force") !== "1")
             return J({ error: "This sale has recorded sales", sold: sold.n, needs_force: true }, 409);
           const ps = (await db.prepare(
             "SELECT p.r2_key FROM photos p JOIN items i ON i.id=p.item_id WHERE i.sale_id=?").bind(sid).all()).results;
+          // Road Show and Bottle Tree are two workers over one database, so a statement issued
+          // in the other app covers these same items. Deleting here would pull the evidence out
+          // from under a document a dealer is holding, and nothing in this app would have shown
+          // it existed. Drafts do not block: nothing has been handed over yet.
+          const settled = await db.prepare(
+            "SELECT COUNT(*) AS n FROM statement_items si JOIN statements st ON st.id=si.statement_id " +
+            "WHERE st.status IN ('issued','paid') AND si.item_id IN (SELECT id FROM items WHERE sale_id=?)")
+            .bind(sid).first();
+          if (settled.n)
+            return J({ error: `${settled.n} item${settled.n === 1 ? "" : "s"} in this sale ` +
+              `${settled.n === 1 ? "is" : "are"} on a dealer statement that has already been issued. ` +
+              `Void that statement first if it really needs to go.`, settled_items: settled.n }, 409);
           // R2 deletes are best-effort: a failed key must not leave the rows behind.
           await Promise.all(ps.map(x => env.PHOTOS.delete(x.r2_key).catch(() => {})));
           await db.prepare("DELETE FROM photos WHERE item_id IN (SELECT id FROM items WHERE sale_id=?)").bind(sid).run();
@@ -634,8 +713,59 @@ export default {
           await db.prepare(`UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status=CASE WHEN listing_status='live' THEN 'hidden' ELSE listing_status END WHERE id IN (${ph2})`).bind(txnId, now(), ...soldIds).run();
           return J({ txn_id: txnId, total_cents: total, item_count: rows.length });
         }
+        // Undo a sale that should not have happened: wrong tag scanned, customer changed their
+        // mind at the door, card declined after the drawer opened. The transaction is kept and
+        // marked, never deleted — the drawer has to reconcile against something, and "it is not
+        // there any more" is not an explanation anybody can give a customer or an accountant.
+        if (parts[3] === "txns" && parts[5] === "void" && m === "POST") {
+          const t = await db.prepare("SELECT * FROM txns WHERE id=? AND sale_id=?").bind(parts[4], sid).first();
+          if (!t) return J({ error: "not found" }, 404);
+          if (t.status === "void") return J({ error: "This sale was already voided", voided_at: t.voided_at }, 409);
+          // An online sale took real money through Stripe. Marking it void here would put the
+          // books and the card processor permanently out of step, and this app cannot move
+          // money. The refund has to happen where the charge did.
+          if (t.tender === "stripe")
+            return J({ error: "This was an online card sale. Refund it in Stripe first — " +
+                              "voiding it here would leave the books and the card processor disagreeing.",
+                       tender: "stripe" }, 409);
+          const b = await readJson(request);
+          // The items go back on the shelf, but a listing that was pulled down when they sold
+          // stays down: we recorded that it went from live to hidden, not that it should come
+          // back, and silently republishing something to a storefront is not ours to decide.
+          const back = (await db.prepare("SELECT id,name,price_cents FROM items WHERE txn_id=?").bind(t.id).all()).results;
+          // A statement that has already been issued has a frozen copy of these lines, and the
+          // money on it has been promised to a dealer. Voiding is still allowed — a return is a
+          // real event and refusing to record it would be worse — but it cannot be silent.
+          const ids = back.map(r => r.id);
+          if (ids.length) {
+            const ph3 = ids.map(() => "?").join(",");
+            const hit = (await db.prepare(
+              "SELECT st.id, st.status, s.name AS seller_name, st.period_start, st.period_end, " +
+              "COUNT(si.id) AS n, COALESCE(SUM(si.price_cents),0) AS cents " +
+              "FROM statement_items si JOIN statements st ON st.id=si.statement_id " +
+              "JOIN sellers s ON s.id=st.seller_id " +
+              `WHERE st.status IN ('issued','paid') AND si.item_id IN (${ph3}) ` +
+              "GROUP BY st.id ORDER BY st.period_start").bind(...ids).all()).results;
+            if (hit.length && b.acknowledge_statements !== true)
+              return J({
+                error: hit.length === 1
+                  ? `${hit[0].n} of these items ${hit[0].n === 1 ? "is" : "are"} on ${hit[0].seller_name}'s ` +
+                    `${hit[0].status} statement for ${hit[0].period_start} to ${hit[0].period_end}. ` +
+                    `Voiding does not change that statement — deduct it on their next one.`
+                  : `These items are on ${hit.length} statements that have already been issued. ` +
+                    `Voiding does not change them — deduct the returns on the next statements.`,
+                statements: hit, needs_acknowledgement: true }, 409);
+          }
+          await db.prepare("UPDATE txns SET status='void', voided_at=?, void_reason=? WHERE id=?")
+            .bind(now(), (b.reason || "").trim().slice(0, 200) || null, t.id).run();
+          // sold_at is what a statement filters on, so clearing it is what actually takes these
+          // items back out of every future payout. status alone would not.
+          await db.prepare("UPDATE items SET status='available', txn_id=NULL, sold_at=NULL WHERE txn_id=?").bind(t.id).run();
+          return J({ voided: t.id, total_cents: t.total_cents, items_returned: back.length,
+                     items: back.map(r => ({ id: r.id, name: r.name })) });
+        }
         if (parts[3] === "summary" && m === "GET") {
-          const totals = await db.prepare("SELECT COALESCE(SUM(total_cents),0) AS revenue_cents, COUNT(*) AS txn_count FROM txns WHERE sale_id=?").bind(sid).first();
+          const totals = await db.prepare("SELECT COALESCE(SUM(total_cents),0) AS revenue_cents, COUNT(*) AS txn_count FROM txns WHERE sale_id=? AND status='complete'").bind(sid).first();
           const sold = await db.prepare("SELECT COUNT(*) AS sold_items FROM items WHERE sale_id=? AND status='sold'").bind(sid).first();
           const avail = await db.prepare("SELECT COUNT(*) AS available_items, COALESCE(SUM(price_cents),0) AS available_cents FROM items WHERE sale_id=? AND status='available'").bind(sid).first();
           const split = (await db.prepare(

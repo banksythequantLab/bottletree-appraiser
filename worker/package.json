@@ -2,11 +2,12 @@
   "name": "worker",
   "version": "1.0.0",
   "main": "worker.js",
+  "type": "module",
   "directories": {
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node tests/run.mjs"
   },
   "keywords": [],
   "author": "",

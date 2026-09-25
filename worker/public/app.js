@@ -16,7 +16,13 @@ async function api(path, opts) {
   if (!r.ok) {
     let e = {}; try { e = await r.json(); } catch {}
     if (r.status === 402 && e.paywall && window.BTBilling) { BTBilling.refresh().then(() => BTBilling.open("You're out of estimates. Your items and photos are saved.")); }
-    throw new Error(e.error || ("HTTP " + r.status));
+    // Carry the whole error body, not just its message. Callers that can actually resolve a
+    // failure need the detail - which items have no price, what needs confirming - and throwing
+    // a bare string turns every one of those into an unexplained red toast.
+    const err = new Error(e.error || ("HTTP " + r.status));
+    Object.assign(err, e);
+    err.status = r.status;
+    throw err;
   }
   return r.json();
 }
@@ -162,7 +168,12 @@ async function renderSales() {
   state.view = "sales"; state.saleId = null; state.detail = null; setChrome();
   app.innerHTML = `<div class="row" style="justify-content:space-between;align-items:baseline;margin-top:6px">
       <h1 class="h1" style="margin:0">Your sales</h1>
-      <span><a href="#" id="myshop" class="muted" style="font-size:.85rem;font-weight:700;margin-right:12px">My shop</a><a href="#" id="signout" class="muted" style="font-size:.85rem;font-weight:700">Sign out</a></span></div>
+      </div>
+    <div class="row" style="gap:14px;flex-wrap:wrap;align-items:center;margin:0 0 6px">
+      <a href="#" id="orders" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">Orders<span id="ordersDot"></span></a>
+      <a href="#" id="myshop" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">My shop</a>
+      <a href="#" id="signout" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">Sign out</a>
+    </div>
     <div class="row" style="justify-content:space-between;align-items:center;margin:2px 0 4px"><span class="muted" style="font-size:.82rem">${esc(user || "")}</span>${planPill()}</div>
     <div class="card">
       <label>Start a new sale</label>
@@ -190,6 +201,10 @@ async function renderSales() {
   loadSellers();
   $("#newName").addEventListener("keydown", e => { if (e.key === "Enter") createSale(); });
   $("#signout").onclick = e => { e.preventDefault(); logout(); };
+  $("#orders").onclick = e => { e.preventDefault(); renderOrders(); };
+  // An order nobody looks at is the same as no order. A count in the corner is what makes the
+  // owner open the screen on the day something sells, rather than a week later.
+  markOrders();
   $("#myshop").onclick = e => { e.preventDefault(); renderShopSetup(renderSales); };
   if ($("#planPill")) $("#planPill").onclick = e => { e.preventDefault(); BTBilling.open(); };
   if (window.BTBilling && !billingInit) { billingInit = true; BTBilling.init().then(p => { if (p && state.view === "sales") renderSales(); }); }
@@ -854,7 +869,149 @@ async function renderSummary() {
       ${s.split.length ? s.split.map(r => `<div class="split"><span>${esc(r.seller)} <span class="muted" style="font-size:.82rem">· ${r.items} item${r.items === 1 ? "" : "s"}</span></span><span class="amt">${money(r.cents)}</span></div>`).join("")
         : `<div class="muted" style="padding:10px 0">No sales yet — the split fills in as you sell.</div>`}
     </div>
+    <div class="card">
+      <h3 style="margin-bottom:2px">Transactions</h3>
+      <div class="muted" style="font-size:.8rem;margin-bottom:6px">Rang something up wrong? Void it. The items go back on the shelf and the takings drop, but the line stays so the drawer still adds up.</div>
+      <div id="txnList"></div>
+    </div>
     <div class="muted" style="font-size:.8rem;text-align:center;margin-top:10px">Estate Sale Road Show · free POS · cash in person, cards online · AI appraisals by NVIDIA Nemotron on Nebius.</div>`;
+  renderTxns();
+}
+
+// The transactions of this sale, newest first, each with a way to undo it. state.detail is
+// already loaded and carries them, so this does not re-fetch.
+const TENDER = { cash: "cash", stripe: "online card", card: "card" };
+function renderTxns() {
+  const el = $("#txnList"); if (!el) return;
+  const rows = (state.detail && state.detail.txns) || [];
+  if (!rows.length) { el.innerHTML = `<div class="muted" style="font-size:.82rem;padding:4px 0">Nothing rung up yet.</div>`; return; }
+  el.innerHTML = rows.map(t => {
+    const dead = t.status === "void";
+    return `<div class="split" style="align-items:center${dead ? ";opacity:.6" : ""}">
+      <span>
+        <span style="${dead ? "text-decoration:line-through" : ""}">${money(t.total_cents)}</span>
+        <span class="muted" style="font-size:.8rem">· ${t.item_count} item${t.item_count === 1 ? "" : "s"} · ${esc(TENDER[t.tender] || t.tender)} · ${esc(String(t.created_at || "").slice(11, 16))}</span>
+        ${dead ? `<div class="muted" style="font-size:.78rem">Voided${t.void_reason ? " — " + esc(t.void_reason) : ""}</div>` : ""}
+      </span>
+      ${dead ? `<span class="pill">void</span>`
+             : `<button class="btn rust sm" data-void="${t.id}" data-amt="${money(t.total_cents)}" style="margin:0">Void</button>`}
+    </div>`;
+  }).join("");
+  el.querySelectorAll("[data-void]").forEach(b => b.onclick = () => voidTxn(b.dataset.void, b.dataset.amt));
+}
+
+async function voidTxn(id, amt) {
+  if (!confirm(`Void this ${amt} sale?\n\nThe items go back on the shelf and the takings drop by ${amt}. The line stays on record as voided so the drawer still reconciles.`)) return;
+  const reason = prompt("What happened? (optional — it goes on the record)") || "";
+  const send = (extra = {}) => api("/sales/" + state.saleId + "/txns/" + id + "/void",
+    { method: "POST", body: JSON.stringify({ reason, ...extra }) });
+  try { await send(); }
+  catch (e) {
+    // The API refuses once, with the detail, when a dealer has already been handed a statement
+    // covering these items. It is still allowed — but the owner has to know the correction
+    // lands on the next statement, not this one.
+    if (!e.needs_acknowledgement) return toast(e.message);
+    if (!confirm(`${e.message}\n\nVoid anyway?`)) return;
+    try { await send({ acknowledge_statements: true }); }
+    catch (e2) { return toast(e2.message); }
+  }
+  toast("Voided");
+  await loadDetail();
+  renderSummary();
+}
+
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// ---------- Orders from the online store ----------
+// These rows were written from the first day the storefront existed and nothing ever showed
+// them. An online sale happened, the item flipped to sold, and the owner had no list of what
+// was bought, by whom, or where to send it.
+
+const ORDER_STATE = {
+  paid: { label: "paid", tone: "" },
+  needs_refund: { label: "refund owed", tone: "bad" },
+  pending: { label: "not paid yet", tone: "" },
+  cancelled: { label: "cancelled", tone: "" },
+};
+const orderName = o => o.ai_title || o.item_name || "Item";
+const onDay = s => {
+  const d = String(s || "").slice(0, 10).split("-");
+  return d.length === 3 ? `${Number(d[2])} ${MON[+d[1] - 1]}` : "";
+};
+
+// The count beside the Orders link. Failure here is silent on purpose: a storefront the owner
+// has not set up yet should not put an error on the sales screen every time they open it.
+async function markOrders() {
+  const dot = $("#ordersDot"); if (!dot) return;
+  let rows = [];
+  try { rows = (await api("/me/orders")).orders || []; } catch { return; }
+  const n = rows.filter(o => o.needs_attention).length;
+  if (!n) return;
+  const owed = rows.some(o => o.status === "needs_refund");
+  dot.outerHTML = `<span id="ordersDot" class="pill" style="margin-left:5px;${owed ? "color:var(--rust,#b00);border-color:currentColor" : ""}">${n}</span>`;
+}
+
+async function renderOrders() {
+  state.view = "statements"; state.saleId = null; state.detail = null; setChrome();
+  app.innerHTML = `<div class="muted" style="padding:20px;text-align:center">Loading…</div>`;
+  let rows = [];
+  try { rows = (await api("/me/orders")).orders || []; }
+  catch (e) { app.innerHTML = ""; return toast(e.message); }
+
+  const todo = rows.filter(o => o.needs_attention);
+  const rest = rows.filter(o => !o.needs_attention);
+  app.innerHTML = `<h1 class="h1" style="margin:6px 0 2px">Orders</h1>
+    <div class="muted" style="font-size:.82rem;margin:0 0 10px">What the online store has sold. Paid orders stay here until you mark them sent.</div>
+    ${rows.length ? "" : `<div class="empty"><div class="em">📦</div>Nothing has sold online yet. Orders show up here the moment a payment clears.</div>`}
+    ${todo.length ? `<div class="card">
+      <label>Needs you</label>
+      <div id="ordTodo" style="margin-top:6px"></div>
+    </div>` : rows.length ? `<div class="card"><div class="muted" style="font-size:.82rem">Nothing waiting — everything paid for has been sent.</div></div>` : ""}
+    ${rest.length ? `<div class="card" style="margin-top:14px">
+      <label>Everything else</label>
+      <div id="ordRest" style="margin-top:6px"></div>
+    </div>` : ""}
+    <div style="height:14px"></div>
+    <button class="btn sec" id="ordBack">← Your sales</button>
+    <div style="height:20px"></div>`;
+  $("#ordBack").onclick = renderSales;
+  if (todo.length) fillOrders($("#ordTodo"), todo, true);
+  if (rest.length) fillOrders($("#ordRest"), rest, false);
+}
+
+function fillOrders(el, rows, actionable) {
+  el.innerHTML = rows.map(o => {
+    const st = ORDER_STATE[o.status] || { label: o.status, tone: "" };
+    const bad = st.tone === "bad";
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--line)">
+      <div class="split" style="align-items:baseline">
+        <span style="font-weight:700">${esc(orderName(o))}</span>
+        <span class="amt">${money(o.amount_cents)}</span>
+      </div>
+      <div class="muted" style="font-size:.8rem">
+        ${esc(onDay(o.paid_at || o.created_at))} ·
+        <span class="pill" style="${bad ? "color:var(--rust,#b00);border-color:currentColor" : ""}">${esc(st.label)}</span>
+        ${o.buyer_email ? " · " + esc(o.buyer_email) : ""}
+        ${o.fulfilled_at ? " · sent " + esc(onDay(o.fulfilled_at)) : ""}
+      </div>
+      ${o.note ? `<div class="muted" style="font-size:.8rem;margin-top:2px${bad ? ";color:var(--rust,#b00)" : ""}">${esc(o.note)}</div>` : ""}
+      ${bad && o.payment_intent ? `<div style="margin-top:4px"><a href="https://dashboard.stripe.com/payments/${encodeURIComponent(o.payment_intent)}" target="_blank" rel="noopener" style="font-size:.8rem;font-weight:700">Open this payment in Stripe →</a></div>` : ""}
+      ${actionable && o.status === "paid" ? `<div style="margin-top:6px"><button class="btn sec sm" data-sent="${o.id}" style="margin:0">Mark sent</button></div>` : ""}
+      ${!actionable && o.fulfilled_at ? `<div style="margin-top:4px"><a href="#" data-unsent="${o.id}" class="muted" style="font-size:.78rem;font-weight:700">Not sent after all</a></div>` : ""}
+    </div>`;
+  }).join("");
+
+  el.querySelectorAll("[data-sent]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { await api("/me/orders/" + b.dataset.sent + "/sent", { method: "POST" }); }
+    catch (e) { b.disabled = false; return toast(e.message); }
+    toast("Marked sent"); renderOrders();
+  });
+  el.querySelectorAll("[data-unsent]").forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    try { await api("/me/orders/" + a.dataset.unsent + "/sent", { method: "DELETE" }); }
+    catch (err) { return toast(err.message); }
+    toast("Back on the list"); renderOrders();
+  });
 }
 
 // tab bar + back
