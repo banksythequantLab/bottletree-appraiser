@@ -39,7 +39,10 @@ function planPill() {
 function setChrome() {
   const inSale = state.view === "sale";
   tabs.classList.toggle("hidden", !inSale);
-  backBtn.classList.toggle("hidden", !inSale);
+  // Orders and payouts are one level down from sales too, so they get the back arrow — without
+  // it the only way off either screen is the browser's own back button, which on the installed
+  // app is not there at all.
+  backBtn.classList.toggle("hidden", !(inSale || state.view === "orders" || state.view === "statements"));
   ctx.textContent = inSale && state.detail ? state.detail.sale.name : "";
   const showCart = inSale && state.tab === "cashier" && state.cart.size;
   cartbar.classList.toggle("hidden", !showCart);
@@ -171,6 +174,7 @@ async function renderSales() {
       </div>
     <div class="row" style="gap:14px;flex-wrap:wrap;align-items:center;margin:0 0 6px">
       <a href="#" id="orders" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">Orders<span id="ordersDot"></span></a>
+      <a href="#" id="payouts" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">Payouts</a>
       <a href="#" id="myshop" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">My shop</a>
       <a href="#" id="signout" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">Sign out</a>
     </div>
@@ -202,6 +206,7 @@ async function renderSales() {
   $("#newName").addEventListener("keydown", e => { if (e.key === "Enter") createSale(); });
   $("#signout").onclick = e => { e.preventDefault(); logout(); };
   $("#orders").onclick = e => { e.preventDefault(); renderOrders(); };
+  $("#payouts").onclick = e => { e.preventDefault(); renderStatements(); };
   // An order nobody looks at is the same as no order. A count in the corner is what makes the
   // owner open the screen on the day something sells, rather than a week later.
   markOrders();
@@ -951,7 +956,9 @@ async function markOrders() {
 }
 
 async function renderOrders() {
-  state.view = "statements"; state.saleId = null; state.detail = null; setChrome();
+  // This said "statements" — a leftover from the fork, where this screen was copied from the
+  // payouts one. Harmless while there was no payouts screen; actively confusing now there is.
+  state.view = "orders"; state.saleId = null; state.detail = null; setChrome();
   app.innerHTML = `<div class="muted" style="padding:20px;text-align:center">Loading…</div>`;
   let rows = [];
   try { rows = (await api("/me/orders")).orders || []; }
@@ -1011,6 +1018,261 @@ function fillOrders(el, rows, actionable) {
     try { await api("/me/orders/" + a.dataset.unsent + "/sent", { method: "DELETE" }); }
     catch (err) { return toast(err.message); }
     toast("Back on the list"); renderOrders();
+  });
+}
+
+// ---------- Dealer payouts (settlements) ----------
+// A statement is the piece of paper a consignor or booth dealer is handed: what of theirs
+// sold, what the sale kept, what rent was charged, what they are owed. Terms live on the
+// dealer, but a statement freezes its own copy of them — so raising a commission rate next
+// month never quietly rewrites a statement somebody is already holding.
+//
+// The tables, the arithmetic and the guards that refuse to delete a sale underneath an issued
+// statement all shipped with this app. The screen did not, which meant the guards could tell an
+// owner to "void that statement first" about a document they had no way to open. Labels here
+// match the CSV and print view exactly, on purpose: one vocabulary, so the figure a dealer
+// queries is the figure on the paper in their hand.
+
+// Default period is the previous calendar month, because that is when anyone sits down to
+// do this. Built from local date parts, not toISOString(), which would shift the boundary
+// by a timezone and quietly drop the 1st or the 31st.
+function lastMonth() {
+  const n = new Date(), y = n.getFullYear(), m = n.getMonth();
+  const pad = x => String(x).padStart(2, "0");
+  const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return { from: iso(new Date(y, m - 1, 1)), to: iso(new Date(y, m, 0)) };
+}
+// money() is always positive; a payout can be negative, and "$-4.00" reads as a typo.
+const dollars = c => (c < 0 ? "-$" : "$") + (Math.abs(c) / 100).toFixed(2);
+// "2026-08-01 → 2026-08-31" is 23 characters and wraps the line on a phone. In a list, where
+// the point is to recognise a period at a glance, "1–31 Aug 2026" says the same thing in half
+// the width. The statement itself, and anything printed, keeps full ISO dates.
+// MON is declared above, for the orders screen.
+function periodShort(from, to) {
+  const a = String(from || "").split("-"), b = String(to || "").split("-");
+  if (a.length !== 3 || b.length !== 3) return `${from} → ${to}`;
+  const d = x => String(Number(x));
+  if (a[0] === b[0] && a[1] === b[1]) return `${d(a[2])}–${d(b[2])} ${MON[+a[1] - 1]} ${a[0]}`;
+  if (a[0] === b[0]) return `${d(a[2])} ${MON[+a[1] - 1]} – ${d(b[2])} ${MON[+b[1] - 1]} ${a[0]}`;
+  return `${d(a[2])} ${MON[+a[1] - 1]} ${a[0]} – ${d(b[2])} ${MON[+b[1] - 1]} ${b[0]}`;
+}
+const netAmt = c => `<span style="font-weight:800;${c < 0 ? "color:var(--rust,#b00)" : ""}">${dollars(c)}</span>`;
+// Three fields on one phone-width row. A column flex per field keeps each caption above its
+// own box; left to the sheet's default a caption sits beside its input and overlaps the next.
+const TERM_LBL = "flex:1;min-width:0;margin:0;font-size:.72rem;display:flex;flex-direction:column;gap:2px";
+// The adjustment row wants four controls and a phone has room for three. "What for" takes a
+// line of its own; the rest share the next one, with min-width:0 so the select shrinks instead
+// of pushing the Add button off the edge.
+const ADJ_LBL = "min-width:0;margin:0;font-size:.72rem;display:flex;flex-direction:column;gap:2px";
+
+async function renderStatements() {
+  state.view = "statements"; state.saleId = null; state.detail = null; setChrome();
+  app.innerHTML = `<div class="muted" style="padding:20px;text-align:center">Loading…</div>`;
+  let dealers = [], made = [];
+  try { dealers = await api("/me/sellers"); made = (await api("/me/statements")).statements || []; }
+  catch (e) { app.innerHTML = ""; return toast(e.message); }
+  const per = lastMonth();
+  app.innerHTML = `<h1 class="h1" style="margin:6px 0 2px">Dealer payouts</h1>
+    <div class="muted" style="font-size:.82rem;margin:0 0 10px">What each dealer is owed for a period, frozen at the moment you save it.</div>
+    ${dealers.length ? `<div class="card">
+      <label>New statement</label>
+      <select id="stWho" style="width:100%">${dealers.map(d =>
+        `<option value="${d.id}">${esc(d.name)}${d.booth ? " · booth " + esc(d.booth) : ""}</option>`).join("")}</select>
+      <div style="height:8px"></div>
+      <div class="row" style="gap:8px">
+        <label style="flex:1;margin:0;font-size:.8rem">From<input type="date" id="stFrom" value="${per.from}"></label>
+        <label style="flex:1;margin:0;font-size:.8rem">To<input type="date" id="stTo" value="${per.to}"></label>
+      </div>
+      <div style="height:10px"></div>
+      <button class="btn sec" id="stPrev">Preview the numbers</button>
+      <div id="stOut"></div>
+    </div>` : `<div class="empty"><div class="em">👥</div>No sellers yet. Add one on the sales screen, then come back.</div>`}
+    <div class="card" style="margin-top:14px">
+      <label>Statements</label>
+      <div id="stList" style="margin-top:6px">${made.length ? "" :
+        `<div class="muted" style="font-size:.82rem;padding:6px 0">None yet.</div>`}</div>
+    </div>
+    ${dealers.length ? `<div class="card" style="margin-top:14px">
+      <label>Dealer terms</label>
+      <div class="muted" style="font-size:.8rem;margin-top:4px">Commission is a percent of what sold. Rent is charged once per statement. Leave both blank for a seller who keeps everything.</div>
+      <div id="stTerms" style="margin-top:10px"></div>
+    </div>` : ""}
+    <div style="height:20px"></div>`;
+
+  const list = $("#stList");
+  if (made.length) {
+    list.innerHTML = made.map(s => `<div class="li tap" data-st="${s.id}">
+        <div><div class="nm">${esc(s.seller_name)}${s.booth ? ` <span class="muted" style="font-size:.8rem">· booth ${esc(s.booth)}</span>` : ""}</div>
+          <div class="muted" style="font-size:.82rem">${esc(periodShort(s.period_start, s.period_end))} · ${s.item_count} item${s.item_count === 1 ? "" : "s"}</div></div>
+        <span class="pr">${netAmt(s.net_cents)} <span class="pill">${esc(s.status)}</span></span>
+      </div>`).join("");
+    list.querySelectorAll("[data-st]").forEach(li => li.onclick = () => renderStatement(li.dataset.st));
+  }
+
+  const terms = $("#stTerms");
+  if (terms) {
+    terms.innerHTML = dealers.map(d => `<div data-terms="${d.id}" style="padding:6px 0;border-bottom:1px solid var(--line)">
+        <div style="font-weight:700;margin-bottom:4px">${esc(d.name)}</div>
+        <div class="row" style="gap:6px;align-items:flex-end">
+          <label style="${TERM_LBL}">Comm %<input type="number" min="0" max="100" step="0.5" data-f="pct" value="${d.commission_pct ?? ""}"></label>
+          <label style="${TERM_LBL}">Rent $<input type="number" min="0" step="1" data-f="rent" value="${d.rent_cents == null ? "" : (d.rent_cents / 100)}"></label>
+          <label style="${TERM_LBL}">Booth<input type="text" data-f="booth" value="${esc(d.booth ?? "")}"></label>
+          <button class="btn sec sm" data-save="${d.id}" style="margin:0">Save</button>
+        </div>
+      </div>`).join("");
+    terms.querySelectorAll("[data-save]").forEach(b => b.onclick = async () => {
+      const box = b.closest("[data-terms]"), f = k => box.querySelector(`[data-f="${k}"]`).value.trim();
+      const pct = f("pct"), rent = f("rent");
+      if (pct !== "" && !(Number(pct) >= 0 && Number(pct) <= 100)) return toast("Commission must be 0–100%");
+      if (rent !== "" && !(Number(rent) >= 0)) return toast("Rent can't be negative");
+      b.disabled = true;
+      try {
+        await api("/me/sellers/" + b.dataset.save, { method: "PATCH", body: JSON.stringify({
+          commission_pct: pct === "" ? null : Number(pct),
+          rent_cents: rent === "" ? null : Math.round(Number(rent) * 100),
+          booth: f("booth") || null }) });
+        toast("Terms saved");
+      } catch (e) { toast(e.message); }
+      b.disabled = false;
+    });
+  }
+
+  // Adjustments belong to the statement being built, and are thrown away if the dealer or the
+  // period changes underneath them — an adjustment is about a particular dealer's particular
+  // month, and carrying one across would put a stranger's correction on someone's payout.
+  let stAdj = [];
+  const adjKey = () => `${$("#stWho") && $("#stWho").value}|${$("#stFrom") && $("#stFrom").value}|${$("#stTo") && $("#stTo").value}`;
+  let stAdjKey = adjKey();
+  ["stWho", "stFrom", "stTo"].forEach(id => { const el = $("#" + id); if (el) el.onchange = () => {
+    if (adjKey() !== stAdjKey) { stAdj = []; stAdjKey = adjKey(); }
+    const o = $("#stOut"); if (o) o.innerHTML = "";
+  }; });
+
+  const prev = $("#stPrev");
+  const runPreview = async () => {
+    stAdjKey = adjKey();
+    const body = JSON.stringify({ seller_id: $("#stWho").value, from: $("#stFrom").value, to: $("#stTo").value,
+                                  adjustments: stAdj });
+    const out = $("#stOut");
+    out.innerHTML = `<div class="muted" style="font-size:.82rem;padding:10px 0">Working…</div>`;
+    let p;
+    try { p = await api("/me/statements/preview", { method: "POST", body }); }
+    catch (e) { out.innerHTML = ""; return toast(e.message); }
+    const s = p.settled;
+    // Preview and save go through the same server-side arithmetic, so what is shown here is
+    // exactly what gets frozen. Nothing is stored until the button below is pressed.
+    out.innerHTML = `<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+        <div class="split"><span>${esc(p.seller.name)} · ${esc(periodShort(p.from, p.to))}</span><span class="muted" style="font-size:.82rem;white-space:nowrap">${s.item_count} item${s.item_count === 1 ? "" : "s"}</span></div>
+        <div class="split"><span>Sold</span><span class="amt">${dollars(s.gross_cents)}</span></div>
+        <div class="split"><span>Commission ${s.commission_pct}%</span><span class="amt">${dollars(-s.commission_cents)}</span></div>
+        <div class="split"><span>Booth rent</span><span class="amt">${dollars(-s.rent_charged_cents)}</span></div>
+        ${stAdj.map((a, i) => `<div class="split"><span>${esc(a.label)}
+            <a href="#" data-rmadj="${i}" class="muted" style="font-size:.75rem;font-weight:700;margin-left:6px">remove</a></span>
+            <span class="amt">${dollars(a.cents)}</span></div>`).join("")}
+        <div class="split" style="border-top:2px solid var(--ink,#111);margin-top:4px;padding-top:6px">
+          <span style="font-weight:800">${s.owes ? "Seller owes you" : "Seller is owed"}</span><span class="amt">${netAmt(s.net_cents)}</span></div>
+        ${s.item_count ? "" : `<div class="muted" style="font-size:.8rem;margin-top:6px">Nothing of theirs sold in this period. Saving still records the rent.</div>`}
+        <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:8px">
+          <label style="margin:0">Adjustment</label>
+          <div class="muted" style="font-size:.78rem;margin:2px 0 6px">A correction that belongs on this statement rather than in the item list — a return from last month, a damaged piece, a supply you covered for them. For something returned after they were paid for it, take off what <em>they</em> received, not the ticket price${s.commission_pct ? ` — ${100 - s.commission_pct}% of it, after your ${s.commission_pct}% commission` : ""}.</div>
+          <label style="${ADJ_LBL};margin-bottom:6px">What for<input type="text" id="adjLabel" maxlength="80" placeholder="e.g. crock returned"></label>
+          <div class="row" style="gap:6px;align-items:flex-end">
+            <label style="${ADJ_LBL};flex:1">Amount $<input type="number" id="adjAmt" min="0" step="0.01" inputmode="decimal"></label>
+            <label style="${ADJ_LBL};flex:1.4">Direction<select id="adjDir" style="width:100%"><option value="-1">Take off</option><option value="1">Pay extra</option></select></label>
+            <button class="btn sec sm" id="adjAdd" style="margin:0;flex:0 0 auto">Add</button>
+          </div>
+        </div>
+        <div style="height:10px"></div>
+        <button class="btn" id="stSave">Save as a draft statement</button>
+      </div>`;
+    $("#adjAdd").onclick = () => {
+      const label = $("#adjLabel").value.trim();
+      const amt = Number($("#adjAmt").value);
+      if (!label) return toast("Say what the adjustment is for — it goes on the statement");
+      if (!(amt > 0)) return toast("Enter an amount");
+      // The direction is a separate choice rather than a minus sign in the amount box, because
+      // a typed minus is the easiest thing in this whole screen to get backwards, and getting
+      // it backwards pays a seller twice instead of taking money back.
+      stAdj.push({ label, cents: Math.round(amt * 100) * Number($("#adjDir").value) });
+      runPreview();
+    };
+    $("#adjLabel").addEventListener("keydown", e => { if (e.key === "Enter") $("#adjAdd").click(); });
+    $("#adjAmt").addEventListener("keydown", e => { if (e.key === "Enter") $("#adjAdd").click(); });
+    out.querySelectorAll("[data-rmadj]").forEach(a => a.onclick = e => {
+      e.preventDefault();
+      stAdj.splice(Number(a.dataset.rmadj), 1);
+      runPreview();
+    });
+    $("#stSave").onclick = async () => {
+      $("#stSave").disabled = true;
+      try { const r = await api("/me/statements", { method: "POST", body }); toast("Statement saved"); return renderStatement(r.statement_id); }
+      catch (e) { $("#stSave").disabled = false; toast(e.message); }
+    };
+  };
+  if (prev) prev.onclick = runPreview;
+}
+
+// One statement, with the two things that make it a document: something to hand over
+// (CSV or print) and a status that only moves one way.
+const NEXT_LABEL = { issued: "Mark as issued", paid: "Mark as paid", void: "Void this statement" };
+async function renderStatement(id) {
+  state.view = "statements"; setChrome();
+  app.innerHTML = `<div class="muted" style="padding:20px;text-align:center">Loading…</div>`;
+  let st;
+  try { st = await api("/me/statements/" + id); }
+  catch (e) { toast(e.message); return renderStatements(); }
+  const next = { draft: ["issued", "void"], issued: ["paid", "void"], paid: [], void: [] }[st.status] || [];
+  app.innerHTML = `<div class="row" style="justify-content:space-between;align-items:baseline;margin-top:6px">
+      <h1 class="h1" style="margin:0">${esc(st.seller_name)}</h1><span class="pill">${esc(st.status)}</span></div>
+    <div class="muted" style="font-size:.82rem;margin:2px 0 10px">${esc(st.period_start)} → ${esc(st.period_end)}${st.booth ? " · booth " + esc(st.booth) : ""}</div>
+    <div class="card">
+      ${st.items.length ? st.items.map(l => `<div class="split"><span>${esc(l.name)}
+          <span class="muted" style="font-size:.78rem">· ${esc(String(l.sold_at || "").slice(0, 10))}</span></span>
+          <span class="amt">${dollars(l.price_cents)}</span></div>`).join("")
+        : `<div class="muted" style="font-size:.82rem;padding:6px 0">No items sold in this period.</div>`}
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="split"><span>Sold</span><span class="amt">${dollars(st.gross_cents)}</span></div>
+      <div class="split"><span>Commission ${st.commission_pct}%</span><span class="amt">${dollars(-st.commission_cents)}</span></div>
+      <div class="split"><span>Booth rent</span><span class="amt">${dollars(-st.rent_charged_cents)}</span></div>
+      ${(st.adjustments || []).map(a => `<div class="split"><span>${esc(a.label)}</span><span class="amt">${dollars(a.cents)}</span></div>`).join("")}
+      <div class="split" style="border-top:2px solid var(--ink,#111);margin-top:4px;padding-top:6px">
+        <span style="font-weight:800">${st.net_cents < 0 ? "Owes you" : "Net due"}</span><span class="amt">${netAmt(st.net_cents)}</span></div>
+    </div>
+    ${st.note ? `<div class="muted" style="font-size:.82rem;margin-top:8px">${esc(st.note)}</div>` : ""}
+    <div class="card" style="margin-top:12px">
+      <label>Hand it over</label>
+      <div class="row" style="gap:8px;margin-top:6px">
+        <a class="btn sec" style="flex:1;text-align:center;text-decoration:none" href="/api/me/statements/${encodeURIComponent(st.id)}/print" target="_blank" rel="noopener">Print view</a>
+        <a class="btn sec" style="flex:1;text-align:center;text-decoration:none" href="/api/me/statements/${encodeURIComponent(st.id)}/csv">Download CSV</a>
+      </div>
+    </div>
+    ${next.length ? `<div class="card" style="margin-top:12px">
+      <label>Status</label>
+      <div class="muted" style="font-size:.8rem;margin-top:4px">${st.status === "draft"
+        ? "Still a draft — nothing is protected until you issue it."
+        : "Issued. The sales behind it can no longer be deleted unless you void it."}</div>
+      <div style="height:8px"></div>
+      ${next.map(t => `<button class="btn ${t === "void" ? "rust" : ""}" data-to="${t}" style="margin-top:6px">${NEXT_LABEL[t]}</button>`).join("")}
+    </div>` : `<div class="muted" style="font-size:.82rem;margin-top:12px;text-align:center">${
+      st.status === "paid"
+        // Deliberately final. This seller has been paid; letting the document be voided would
+        // erase the record of money that actually moved. A correction goes on the next one.
+        ? "Paid, and final — this is the record of a payment that happened. Anything that needs correcting goes on their next statement as an adjustment."
+        : "Voided."}</div>`}
+    <div style="height:14px"></div>
+    <button class="btn sec" id="stBack">← All payouts</button>
+    <div style="height:20px"></div>`;
+  $("#stBack").onclick = renderStatements;
+  app.querySelectorAll("[data-to]").forEach(b => b.onclick = async () => {
+    const to = b.dataset.to;
+    if (to === "void" && !confirm(`Void this statement?\n\nIt stays on record as voided and stops counting. If you already handed ${st.seller_name} a copy, that copy is now wrong — tell them.`)) return;
+    if (to === "issued" && !confirm(`Issue this statement?\n\nAfter this the sales behind it can't be deleted while it stands, which is the point. The figures are already frozen either way.`)) return;
+    b.disabled = true;
+    try { await api("/me/statements/" + st.id + "/status", { method: "POST", body: JSON.stringify({ to }) }); }
+    catch (e) { b.disabled = false; return toast(e.message); }
+    toast(to === "void" ? "Voided" : to === "paid" ? "Marked paid" : "Issued");
+    renderStatement(st.id);
   });
 }
 
