@@ -29,8 +29,12 @@ window.BTBilling = (() => {
   function summary() {
     if (!plan) return "";
     if (plan.plan === "unlimited") return "Unlimited estimates";
-    if (plan.plan === "pro") return `${Math.max(0, plan.monthly_cap - plan.used_this_month)} of ${plan.monthly_cap} left this month`;
-    return `${plan.credits} estimate${plan.credits === 1 ? "" : "s"} left`;
+    // A missing number here used to reach the screen as the word "undefined" next to the
+    // person's email. Absent and zero mean the same thing to a customer, so say zero.
+    const n = v => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
+    if (plan.plan === "pro") return `${Math.max(0, n(plan.monthly_cap) - n(plan.used_this_month))} of ${n(plan.monthly_cap)} left this month`;
+    const c = n(plan.credits);
+    return `${c} estimate${c === 1 ? "" : "s"} left`;
   }
 
   const ORDER = ["estimate_1", "estimate_10", "pro_monthly", "unlimited_monthly"];

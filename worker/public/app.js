@@ -187,10 +187,19 @@ async function logout() {
 // ---------- Sales list ----------
 async function renderSales() {
   state.view = "sales"; state.saleId = null; state.detail = null; setChrome();
-  app.innerHTML = `<div class="row" style="justify-content:space-between;align-items:baseline;margin-top:6px">
-      <h1 class="h1" style="margin:0">Your sales</h1>
-      <span><a href="#" id="payouts" class="muted" style="font-size:.85rem;font-weight:700;margin-right:12px">Payouts</a><a href="#" id="myshop" class="muted" style="font-size:.85rem;font-weight:700;margin-right:12px">My shop</a><a href="#" id="signout" class="muted" style="font-size:.85rem;font-weight:700">Sign out</a></span></div>
-    <div class="row" style="justify-content:space-between;align-items:center;margin:2px 0 4px"><span class="muted" style="font-size:.82rem">${esc(user || "")}</span>${planPill()}</div>
+  // Four links no longer fit beside the title on a phone: they wrapped, and "Sign out" broke
+  // across two lines mid-word. The title gets its own line and the links get a row of their
+  // own that wraps as whole words.
+  const navLink = (id, text, extra = "") =>
+    `<a href="#" id="${id}" class="muted" style="font-size:.85rem;font-weight:700;white-space:nowrap">${text}${extra}</a>`;
+  app.innerHTML = `<h1 class="h1" style="margin:6px 0 2px">Your sales</h1>
+    <div class="row" style="gap:14px;flex-wrap:wrap;align-items:center;margin:0 0 6px">
+      ${navLink("orders", "Orders", `<span id="ordersDot"></span>`)}
+      ${navLink("payouts", "Payouts")}
+      ${navLink("myshop", "My shop")}
+      ${navLink("signout", "Sign out")}
+    </div>
+    <div class="row" style="justify-content:space-between;align-items:center;margin:2px 0 4px;gap:8px;flex-wrap:wrap"><span class="muted" style="font-size:.82rem">${esc(user || "")}</span>${planPill()}</div>
     <div class="card">
       <label>Start a new sale</label>
       <div class="row"><input id="newName" placeholder="e.g. Saturday Garage Sale" enterkeyhint="go"></div>
@@ -219,6 +228,10 @@ async function renderSales() {
   $("#signout").onclick = e => { e.preventDefault(); logout(); };
   $("#myshop").onclick = e => { e.preventDefault(); renderShopSetup(renderSales); };
   $("#payouts").onclick = e => { e.preventDefault(); renderStatements(); };
+  $("#orders").onclick = e => { e.preventDefault(); renderOrders(); };
+  // An order nobody looks at is the same as no order. A count in the corner is what makes the
+  // owner open the screen on the day something sells, rather than a week later.
+  markOrders();
   if ($("#planPill")) $("#planPill").onclick = e => { e.preventDefault(); BTBilling.open(); };
   if (window.BTBilling && !billingInit) { billingInit = true; BTBilling.init().then(p => { if (p && state.view === "sales") renderSales(); }); }
   const list = await api("/sales");
@@ -981,6 +994,99 @@ async function voidTxn(id, amt) {
   toast("Voided");
   await loadDetail();
   renderSummary();
+}
+
+// ---------- Orders from the online store ----------
+// These rows were written from the first day the storefront existed and nothing ever showed
+// them. An online sale happened, the item flipped to sold, and the owner had no list of what
+// was bought, by whom, or where to send it.
+
+const ORDER_STATE = {
+  paid: { label: "paid", tone: "" },
+  needs_refund: { label: "refund owed", tone: "bad" },
+  pending: { label: "not paid yet", tone: "" },
+  cancelled: { label: "cancelled", tone: "" },
+};
+const orderName = o => o.ai_title || o.item_name || "Item";
+const onDay = s => {
+  const d = String(s || "").slice(0, 10).split("-");
+  return d.length === 3 ? `${Number(d[2])} ${MON[+d[1] - 1]}` : "";
+};
+
+// The count beside the Orders link. Failure here is silent on purpose: a storefront the owner
+// has not set up yet should not put an error on the sales screen every time they open it.
+async function markOrders() {
+  const dot = $("#ordersDot"); if (!dot) return;
+  let rows = [];
+  try { rows = (await api("/me/orders")).orders || []; } catch { return; }
+  const n = rows.filter(o => o.needs_attention).length;
+  if (!n) return;
+  const owed = rows.some(o => o.status === "needs_refund");
+  dot.outerHTML = `<span id="ordersDot" class="pill" style="margin-left:5px;${owed ? "color:var(--rust,#b00);border-color:currentColor" : ""}">${n}</span>`;
+}
+
+async function renderOrders() {
+  state.view = "statements"; state.saleId = null; state.detail = null; setChrome();
+  app.innerHTML = `<div class="muted" style="padding:20px;text-align:center">Loading…</div>`;
+  let rows = [];
+  try { rows = (await api("/me/orders")).orders || []; }
+  catch (e) { app.innerHTML = ""; return toast(e.message); }
+
+  const todo = rows.filter(o => o.needs_attention);
+  const rest = rows.filter(o => !o.needs_attention);
+  app.innerHTML = `<h1 class="h1" style="margin:6px 0 2px">Orders</h1>
+    <div class="muted" style="font-size:.82rem;margin:0 0 10px">What the online store has sold. Paid orders stay here until you mark them sent.</div>
+    ${rows.length ? "" : `<div class="empty"><div class="em">📦</div>Nothing has sold online yet. Orders show up here the moment a payment clears.</div>`}
+    ${todo.length ? `<div class="card">
+      <label>Needs you</label>
+      <div id="ordTodo" style="margin-top:6px"></div>
+    </div>` : rows.length ? `<div class="card"><div class="muted" style="font-size:.82rem">Nothing waiting — everything paid for has been sent.</div></div>` : ""}
+    ${rest.length ? `<div class="card" style="margin-top:14px">
+      <label>Everything else</label>
+      <div id="ordRest" style="margin-top:6px"></div>
+    </div>` : ""}
+    <div style="height:14px"></div>
+    <button class="btn sec" id="ordBack">← Your sales</button>
+    <div style="height:20px"></div>`;
+  $("#ordBack").onclick = renderSales;
+  if (todo.length) fillOrders($("#ordTodo"), todo, true);
+  if (rest.length) fillOrders($("#ordRest"), rest, false);
+}
+
+function fillOrders(el, rows, actionable) {
+  el.innerHTML = rows.map(o => {
+    const st = ORDER_STATE[o.status] || { label: o.status, tone: "" };
+    const bad = st.tone === "bad";
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--line)">
+      <div class="split" style="align-items:baseline">
+        <span style="font-weight:700">${esc(orderName(o))}</span>
+        <span class="amt">${money(o.amount_cents)}</span>
+      </div>
+      <div class="muted" style="font-size:.8rem">
+        ${esc(onDay(o.paid_at || o.created_at))} ·
+        <span class="pill" style="${bad ? "color:var(--rust,#b00);border-color:currentColor" : ""}">${esc(st.label)}</span>
+        ${o.buyer_email ? " · " + esc(o.buyer_email) : ""}
+        ${o.fulfilled_at ? " · sent " + esc(onDay(o.fulfilled_at)) : ""}
+      </div>
+      ${o.note ? `<div class="muted" style="font-size:.8rem;margin-top:2px${bad ? ";color:var(--rust,#b00)" : ""}">${esc(o.note)}</div>` : ""}
+      ${bad && o.payment_intent ? `<div style="margin-top:4px"><a href="https://dashboard.stripe.com/payments/${encodeURIComponent(o.payment_intent)}" target="_blank" rel="noopener" style="font-size:.8rem;font-weight:700">Open this payment in Stripe →</a></div>` : ""}
+      ${actionable && o.status === "paid" ? `<div style="margin-top:6px"><button class="btn sec sm" data-sent="${o.id}" style="margin:0">Mark sent</button></div>` : ""}
+      ${!actionable && o.fulfilled_at ? `<div style="margin-top:4px"><a href="#" data-unsent="${o.id}" class="muted" style="font-size:.78rem;font-weight:700">Not sent after all</a></div>` : ""}
+    </div>`;
+  }).join("");
+
+  el.querySelectorAll("[data-sent]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { await api("/me/orders/" + b.dataset.sent + "/sent", { method: "POST" }); }
+    catch (e) { b.disabled = false; return toast(e.message); }
+    toast("Marked sent"); renderOrders();
+  });
+  el.querySelectorAll("[data-unsent]").forEach(a => a.onclick = async e => {
+    e.preventDefault();
+    try { await api("/me/orders/" + a.dataset.unsent + "/sent", { method: "DELETE" }); }
+    catch (err) { return toast(err.message); }
+    toast("Back on the list"); renderOrders();
+  });
 }
 
 // ---------- Dealer payouts (settlements) ----------

@@ -3,6 +3,7 @@
 import { planFor, consumeEstimate, refundEstimate, applyRevenueCatEvent } from "./billing.js";
 import { appraise } from "./appraiser.js";
 import { settle, periodError, canTransition } from "./settlements.js";
+import { webhookAction, fulfilResult, needsAttention } from "./orders.js";
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const enc = new TextEncoder();
@@ -162,15 +163,29 @@ async function verifyStripeSig(env, rawBody, sigHeader) {
   const expected = await hmacHex(env.STRIPE_WEBHOOK_SECRET, `${parts.t}.${rawBody}`);
   return timingEq(expected, parts.v1);
 }
-async function markSoldOnline(db, itemId, sessionId, email) {
-  const item = await db.prepare("SELECT * FROM items WHERE id=? AND status='available'").bind(itemId).first();
-  if (!item) return false;
-  const txnId = uid();
-  await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)")
-    .bind(txnId, item.sale_id, item.price_cents, 1, "stripe", now()).run();
-  await db.prepare("UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status='hidden' WHERE id=?").bind(txnId, now(), itemId).run();
-  await db.prepare("UPDATE orders SET status='paid', paid_at=?, buyer_email=? WHERE stripe_session_id=?").bind(now(), email || null, sessionId).run();
-  return true;
+// The payment has settled. Sell the item if it is still there — and if it is not, say so on the
+// order instead of failing quietly, because the buyer has paid either way.
+async function markSoldOnline(db, itemId, sessionId, email, paymentIntent) {
+  // Stripe retries a webhook until it gets a 2xx, and sends completed and
+  // async_payment_succeeded for the same session. Without this, the second delivery would find
+  // the item no longer available — because this very order sold it — and tell the owner to
+  // refund a perfectly good sale. Settling is done once per session.
+  const existing = await db.prepare("SELECT status FROM orders WHERE stripe_session_id=?").bind(sessionId).first();
+  if (existing && existing.status !== "pending")
+    return { status: existing.status, note: null, sold: existing.status === "paid", already: true };
+  const item = itemId ? await db.prepare("SELECT * FROM items WHERE id=? AND status='available'").bind(itemId).first() : null;
+  const out = fulfilResult(!!item);
+  if (item) {
+    const txnId = uid();
+    await db.prepare("INSERT INTO txns (id,sale_id,total_cents,item_count,tender,created_at) VALUES (?,?,?,?,?,?)")
+      .bind(txnId, item.sale_id, item.price_cents, 1, "stripe", now()).run();
+    await db.prepare("UPDATE items SET status='sold', txn_id=?, sold_at=?, listing_status='hidden' WHERE id=?").bind(txnId, now(), itemId).run();
+  }
+  // paid_at records when the money settled, whether or not there was anything left to send.
+  await db.prepare("UPDATE orders SET status=?, note=?, paid_at=?, updated_at=?, buyer_email=COALESCE(?,buyer_email), " +
+    "payment_intent=COALESCE(?,payment_intent) WHERE stripe_session_id=?")
+    .bind(out.status, out.note, now(), now(), email || null, paymentIntent || null, sessionId).run();
+  return out;
 }
 
 // ---------- public storefront (server-rendered) ----------
@@ -284,11 +299,25 @@ export default {
           const raw = await request.text();
           if (!env.STRIPE_WEBHOOK_SECRET || !(await verifyStripeSig(env, raw, request.headers.get("stripe-signature")))) return J({ error: "bad signature" }, 400);
           const ev = JSON.parse(raw);
-          if (ev.type === "checkout.session.completed") {
-            const s = ev.data.object;
-            await markSoldOnline(db, s.metadata?.item_id, s.id, s.customer_details?.email);
+          // What the event means is decided in orders.js, away from the database, because the
+          // rules are about money and deserve to be tested as rules. In particular a completed
+          // session is not necessarily a paid one: ACH and vouchers complete first and confirm
+          // later, and selling the item on completion alone takes it off the shelf for a
+          // payment that may never arrive.
+          const act = webhookAction(ev);
+          if (act.do === "fulfil" && act.session_id)
+            return J({ received: true, ...(await markSoldOnline(db, act.item_id, act.session_id, act.email, act.payment_intent)) });
+          if (act.do === "cancel" && act.session_id) {
+            // Only a live order can be cancelled. One that already settled must never be
+            // reopened by a late or duplicated event.
+            await db.prepare("UPDATE orders SET status='cancelled', note=?, updated_at=? WHERE stripe_session_id=? AND status='pending'")
+              .bind(act.reason || null, now(), act.session_id).run();
+            return J({ received: true, cancelled: true });
           }
-          return J({ received: true });
+          if (act.do === "wait" && act.session_id)
+            await db.prepare("UPDATE orders SET note=?, updated_at=? WHERE stripe_session_id=? AND status='pending'")
+              .bind(act.reason || null, now(), act.session_id).run();
+          return J({ received: true, action: act.do });
         }
         return J({ error: "not found" }, 404);
       }
@@ -695,6 +724,42 @@ ${st.note ? `<p class="sub">${esc(st.note)}</p>` : ""}
             "paid_at=CASE WHEN ?='paid' THEN ? ELSE paid_at END WHERE id=?")
             .bind(to, to, ts, to, ts, st.id).run();
           return J({ id: st.id, status: to });
+        }
+        return J({ error: "not found" }, 404);
+      }
+
+      // ---------- orders: what the online store sold, and what still has to be sent ----------
+      // These rows existed from the first day of the storefront and nothing ever read them.
+      if (parts[1] === "me" && parts[2] === "orders") {
+        if (parts.length === 3 && m === "GET") {
+          // The join through items and sales is what scopes these to this shop. An order has no
+          // user_id of its own; the item it is for is what makes it yours.
+          const rows = (await db.prepare(
+            "SELECT o.*, i.name AS item_name, i.ai_title, i.status AS item_status " +
+            "FROM orders o JOIN items i ON i.id=o.item_id JOIN sales s ON s.id=i.sale_id " +
+            "WHERE s.user_id=? ORDER BY o.created_at DESC LIMIT 200").bind(userId).all()).results;
+          return J({ orders: rows.map(o => ({ ...o, needs_attention: needsAttention(o) })) });
+        }
+        // Marking an order sent, and taking that back — a tracking number typed against the
+        // wrong row is a mistake worth being able to undo.
+        if (parts.length === 5 && parts[4] === "sent" && (m === "POST" || m === "DELETE")) {
+          const o = await db.prepare(
+            "SELECT o.* FROM orders o JOIN items i ON i.id=o.item_id JOIN sales s ON s.id=i.sale_id " +
+            "WHERE o.id=? AND s.user_id=?").bind(parts[3], userId).first();
+          if (!o) return J({ error: "not found" }, 404);
+          if (m === "DELETE") {
+            await db.prepare("UPDATE orders SET fulfilled_at=NULL, updated_at=? WHERE id=?").bind(now(), o.id).run();
+            return J({ id: o.id, fulfilled_at: null });
+          }
+          // Only something that was actually paid for can be sent. Marking a pending or
+          // cancelled order as sent would put a lie in the only record of it.
+          if (o.status !== "paid")
+            return J({ error: o.status === "needs_refund"
+              ? "This buyer paid for something that had already sold. Refund them in Stripe rather than marking it sent."
+              : `This order is ${o.status}, so there is nothing to send yet.`, status: o.status }, 409);
+          const ts = now();
+          await db.prepare("UPDATE orders SET fulfilled_at=?, updated_at=? WHERE id=?").bind(ts, ts, o.id).run();
+          return J({ id: o.id, fulfilled_at: ts });
         }
         return J({ error: "not found" }, 404);
       }
