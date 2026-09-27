@@ -1015,6 +1015,19 @@ function priceOf(d, currency) {
   };
 }
 
+// A price_range that is present is not a price_range that says anything. The prompts show the
+// model the empty shape {"low":0,"high":0,...} and sometimes it hands that shape straight back,
+// with a perfectly sensible basis note beside it. Measured 2026-09-27 on a phone: the re-pricing
+// pass returned exactly that - zeros, plus "4 comparables ... at $190-$390 (median $242)" - and a
+// bare truthiness check let it overwrite a good first-pass price. The dealer got terrific
+// comparables under an empty range, and no warning, because the "no price" check had already run.
+// So a range is only usable when it actually prices something.
+export function usablePrice(range, currency) {
+  if (!range || typeof range !== "object") return null;
+  const p = priceOf(range, currency);
+  return p.high > 0 ? p : null;
+}
+
 const score = d => [num((d.price_range || {}).high) > 0, num(d.confidence) > 0, strs(d.evidence).length > 0,
                     !!(d.listing || {}).description, !!(d.identification || {}).name].filter(Boolean).length;
 const incomplete = d => num((d.price_range || {}).high) <= 0 || !strs(d.evidence).length || num(d.confidence) <= 0;
@@ -1623,7 +1636,10 @@ export async function appraise(env, req) {
       // Both halves are real, and they trade against each other. The prior buys an answer every
       // time and poisons it; withholding it buys a good answer less than half the time. Hence the
       // cold fallback below rather than a choice between the two.
-      if (second.price_range) price = priceOf(second.price_range, currency);
+      // usablePrice, not truthiness: an all-zero range must fall through to the cold fallback,
+      // not replace the price we already have. See usablePrice for the measured failure.
+      const secondPrice = usablePrice(second.price_range, currency);
+      if (secondPrice) price = secondPrice;
       else {
         // Withholding the prior is what makes the price well-calibrated, and it is also what
         // makes the model decline to answer: 13 of 30 cold runs returned a price_range where 30
@@ -1840,6 +1856,12 @@ export async function appraise(env, req) {
       : ` ${m.count} comparable${m.count === 1 ? "" : "s"} listed on eBay right now at ` +
         `$${m.low}-$${m.high} (median $${m.median}) — asking prices, not sold.`)).trim();
   }
+
+  // Last line of defence. The "no price" warning above runs after the FIRST pass only; every
+  // later stage (comps re-pricing, lot scaling, melt) can still leave the range at zero, and on
+  // 2026-09-27 one did - silently. Whatever produced it, a zero range never leaves here unflagged.
+  if (!(price.high > 0) && !warnings.some(w => /no price|neither pricing pass/i.test(w)))
+    warnings.push("no price could be set for this item; enter one by hand, or re-run the estimate");
 
   return {
     melt,
